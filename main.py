@@ -36,18 +36,42 @@ PAGE = """<!doctype html>
     form.ask { display: flex; gap: 8px; }
     input[name="prompt"] { flex: 1; padding: 10px; }
     button { padding: 8px 16px; }
+    button:disabled { opacity: 0.6; }
+    #loader {
+      display: none; position: fixed; inset: 0; z-index: 20;
+      background: rgba(255,255,255,.82);
+      flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+    }
+    #loader.show { display: flex; }
+    .spinner {
+      width: 36px; height: 36px; border: 3px solid #e5e7eb;
+      border-top-color: #2563eb; border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
+  <div id="loader" aria-live="polite">
+    <div class="spinner" aria-hidden="true"></div>
+    <p>Ждём ответ Gemini…</p>
+  </div>
   <h1>Чат с Gemini</h1>
   <div class="log">{messages}</div>
-  <form class="ask" method="post" action="/">
+  <form class="ask" method="post" action="/" onsubmit="showLoader()">
+    <input type="hidden" name="action" value="send">
     <input type="text" name="prompt" placeholder="Новый запрос" autocomplete="off" autofocus>
-    <button type="submit" name="action" value="send">Отправить</button>
+    <button type="submit" id="go">Отправить</button>
   </form>
   <form method="post" action="/" style="margin-top:8px">
     <button type="submit" name="action" value="clear">Очистить историю</button>
   </form>
+  <script>
+    function showLoader() {
+      document.getElementById("loader").classList.add("show");
+      document.getElementById("go").textContent = "Ждём…";
+    }
+  </script>
 </body>
 </html>
 """
