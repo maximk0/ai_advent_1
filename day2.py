@@ -7,6 +7,7 @@ import argparse
 import html
 import json
 import os
+import zlib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-MODEL = "gemini-flash-lite-latest"
+MODEL = "gemini-3.5-flash-lite"
 PORT = 8002
 DEFAULT_PROMPT = "Дай рецепт греческого салата."
 STOP_MARK = "###END"
@@ -121,24 +122,32 @@ def ask_llm(
         raise RuntimeError("Нет GEMINI_API_KEY в .env")
 
     rules: list[str] = []
-    config: dict = {}
+    # Один запрос + одни флаги → один seed, temperature=0 — без случайного разброса.
+    seed = zlib.crc32(f"{prompt}|{use_format}|{use_limit}|{use_stop}".encode("utf-8")) & 0x7FFFFFFF
+    config: dict = {
+        "temperature": 0,
+        "topK": 1,
+        "seed": seed,
+    }
     if use_format:
         config["responseMimeType"] = "application/json"
         config["responseSchema"] = RECIPE_SCHEMA
         rules.append(
-            "Ответ — JSON с полями dish и ingredients. "
-            "У каждого ингредиента: name, weight, order (порядок в блюде, с 1)."
+            "Ответ — строго JSON: dish и ingredients. "
+            "У каждого ингредиента только name, weight, order (с 1). "
+            "Не добавляй другие поля и не пиши текст вне JSON."
         )
     if use_limit:
         config["maxOutputTokens"] = MAX_TOKENS
-        rules.append("Не больше 6 ингредиентов, без длинных пояснений.")
+        rules.append("Ровно 6 ингредиентов, без пояснений и шагов приготовления.")
     else:
         config["maxOutputTokens"] = 2048
     if use_stop:
         config["stopSequences"] = [STOP_MARK]
-        rules.append(
-            f"Когда рецепт готов, сразу напиши {STOP_MARK} и ничего после."
-        )
+        if use_format:
+            rules.append(f"JSON должен быть полным. Не пиши {STOP_MARK} внутрь значений.")
+        else:
+            rules.append(f"Когда рецепт готов, сразу напиши {STOP_MARK} и ничего после.")
 
     payload: dict = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -184,6 +193,7 @@ def ask_llm(
         "json_ok": parsed_ok,
         "finish": candidate.get("finishReason", ""),
         "tokens": usage.get("candidatesTokenCount", usage.get("totalTokenCount", "")),
+        "seed": seed,
         "rules": rules,
         "config": config,
     }
@@ -202,7 +212,7 @@ def compare(prompt: str, use_format: bool, use_limit: bool, use_stop: bool) -> t
 
 def print_block(title: str, result: dict) -> None:
     print(f"\n=== {title} ===")
-    print(f"finishReason: {result['finish']}  tokens: {result['tokens']}")
+    print(f"finishReason: {result['finish']}  tokens: {result['tokens']}  seed: {result['seed']}")
     if result["rules"]:
         print("правила:", " | ".join(result["rules"]))
     print(result["pretty"])
@@ -241,13 +251,13 @@ def html_page(
         results = f"""
         <div class="cols">
           <section>
-            <h2>Без ограничений</h2>
-            <p class="meta">finishReason: {html.escape(str(free['finish']))}; tokens: {html.escape(str(free['tokens']))}</p>
+            <h2>Слева: без ограничений</h2>
+            <p class="meta">Свободный текст, галочки не действуют. finishReason: {html.escape(str(free['finish']))}; tokens: {html.escape(str(free['tokens']))}</p>
             <pre>{html.escape(free['pretty'])}</pre>
           </section>
           <section>
-            <h2>С ограничениями</h2>
-            <p class="meta">finishReason: {html.escape(str(controlled['finish']))}; tokens: {html.escape(str(controlled['tokens']))}; json: {controlled['json_ok']}</p>
+            <h2>Справа: с ограничениями</h2>
+            <p class="meta">Формат фиксирован галочками. finishReason: {html.escape(str(controlled['finish']))}; tokens: {html.escape(str(controlled['tokens']))}; json: {controlled['json_ok']}</p>
             <pre>{html.escape(controlled['pretty'])}</pre>
           </section>
         </div>
