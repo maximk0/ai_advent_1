@@ -4,4 +4,4 @@ __pycache__/
 *.pyc
 history.json
 .DS_Store
-.env
+.idea
