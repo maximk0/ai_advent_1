@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""День 8: Работа с токенами.
-   Рефакторинг UI и визуализация потребления контекста.
+"""День 9: Управление контекстом через суммаризацию.
+   Архивация старых сообщений в сжатое резюме.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from simple_agent import SimpleAgent
 from chat_ui import get_chat_page
 
 ROOT = Path(__file__).resolve().parent
-PORT = 8006
+PORT = 8009
 _LOCK = threading.Lock()
 
 agent = SimpleAgent()
@@ -25,6 +25,10 @@ agent = SimpleAgent()
 # Дополнительный HTML для Sidebar
 SIDEBAR_STATS_HTML = """
 <div class="token-stats">
+  <div class="token-row">
+    <span>Сэкономлено токенов:</span>
+    <span id="statSaved" class="token-val" style="color: #60a5fa;">0</span>
+  </div>
   <div class="token-row">
     <span>Всего токенов:</span>
     <span id="statTotal" class="token-val">0</span>
@@ -47,11 +51,11 @@ SIDEBAR_STATS_HTML = """
   <div style="font-size: 0.6rem; text-align: center; color: var(--text-dim); margin-top: 4px;">Заполнение окна (8k)</div>
 </div>
 
-<div class="config-group" style="margin-top: 10px;">
-  <label class="checkbox-group">
-    <input type="checkbox" id="context_compression" checked>
-    <span>Сжимать токены (OpenRouter)</span>
-  </label>
+<div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
+  <label style="font-weight: 600; display: block; margin-bottom: 5px; font-size: 0.85rem;">Сжатая память (Summary):</label>
+  <div id="summaryBlock" style="font-size: 0.8rem; color: var(--text-dim); background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; line-height: 1.4; font-style: italic;">
+    Нет данных
+  </div>
 </div>
 """
 
@@ -61,6 +65,13 @@ function updateStats(stats) {
   if (!stats) return;
   document.getElementById('statTotal').textContent = stats.total_tokens || 0;
   document.getElementById('statIn').textContent = stats.last_prompt_tokens || 0;
+  document.getElementById('statSaved').textContent = stats.saved_tokens || 0;
+
+  if (stats.summary_context) {
+    document.getElementById('summaryBlock').textContent = stats.summary_context;
+  } else {
+    document.getElementById('summaryBlock').textContent = "Нет данных";
+  }
 
   if (stats.cost !== undefined) {
     document.getElementById('statCost').textContent = '$' + stats.cost.toFixed(6);
@@ -74,9 +85,6 @@ function updateStats(stats) {
   else if (percent > 70) fill.style.background = '#f59e0b';
   else fill.style.background = 'linear-gradient(to right, #6366f1, #a855f7)';
 }
-
-// Слушатель для нового чекбокса
-document.getElementById('context_compression').addEventListener('change', saveCurrentConfig);
 
 // Обновление Out tokens
 const originalAddMessage = addMessage;
@@ -102,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
 
         page_html = get_chat_page(
-            title="Simple Agent — День 8 (Токены)",
+            title="Simple Agent — День 9 (Summary)",
             extra_sidebar_html=SIDEBAR_STATS_HTML,
             extra_scripts=EXTRA_SCRIPTS
         )
@@ -162,7 +170,7 @@ def load_env() -> None:
 
 if __name__ == "__main__":
     load_env()
-    print(f"🚀 День 8 Работа с токенами: http://127.0.0.1:{PORT}")
+    print(f"🚀 День 9 Управление контекстом: http://127.0.0.1:{PORT}")
     try:
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
     except KeyboardInterrupt:

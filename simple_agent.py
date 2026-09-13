@@ -6,8 +6,10 @@ import urllib.error
 
 class SimpleAgent:
     MODEL_DEFAULT = "openrouter/free"
+    WINDOW_SIZE = 8
+    SUMMARY_MODEL = "openai/gpt-4o-mini"
     # Путь к файлу состояния относительно файла скрипта
-    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day8.json")
+    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day9.json")
 
     def __init__(self):
         self.history = []
@@ -17,12 +19,16 @@ class SimpleAgent:
         self.top_p = 1.0
         self.top_k = 0
         self.context_compression = True
+        self.summary_context = ""
+        self.saved_tokens = 0
         self.stats = {"total_tokens": 0, "last_prompt_tokens": 0, "cost": 0}
         self._load_state()
 
     def _save_state(self):
         state = {
             "history": self.history,
+            "summary_context": self.summary_context,
+            "saved_tokens": self.saved_tokens,
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,
@@ -48,6 +54,8 @@ class SimpleAgent:
             with open(self.STATE_FILE, "r", encoding="utf-8") as f:
                 state = json.load(f)
                 self.history = state.get("history", [])
+                self.summary_context = state.get("summary_context", "")
+                self.saved_tokens = state.get("saved_tokens", 0)
                 config = state.get("config", {})
                 self.system_prompt = config.get("system_prompt", self.system_prompt)
                 self.model = config.get("model", self.model)
@@ -70,7 +78,55 @@ class SimpleAgent:
 
     def clear_history(self):
         self.history = []
+        self.summary_context = ""
+        self.saved_tokens = 0
         self._save_state()
+
+    def _summarize_old_messages(self):
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key: return
+
+        # Берем первые 4 сообщения для сжатия
+        to_summarize = self.history[:4]
+        self.history = self.history[4:]
+
+        # Подсчет сэкономленных токенов (приблизительно)
+        for msg in to_summarize:
+            if "usage" in msg:
+                self.saved_tokens += msg["usage"].get("total_tokens", 0)
+            else:
+                self.saved_tokens += len(msg.get("content", "")) // 4
+
+        text_to_summarize = "\n".join([f"{m['role']}: {m['content']}" for m in to_summarize])
+
+        prompt = (
+            "Кратко суммируй ключевые факты и темы этого диалога в один абзац. "
+            "Если уже есть предыдущее резюме, объедини его с новыми данными.\n\n"
+            f"Предыдущее резюме: {self.summary_context}\n\n"
+            f"Новые сообщения:\n{text_to_summarize}"
+        )
+
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        body = {
+            "model": self.SUMMARY_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "X-Title": "Day 9 Summary Service"
+        }
+
+        try:
+            req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=60) as res:
+                resp_data = json.loads(res.read().decode("utf-8"))
+                if "choices" in resp_data:
+                    self.summary_context = resp_data["choices"][0]["message"]["content"]
+                    print(f"[{time.strftime('%H:%M:%S')}] Context summarized. Saved tokens: {self.saved_tokens}")
+        except Exception as e:
+            print(f"Summarization error: {e}")
 
     def chat(self, user_message: str) -> dict:
         api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -78,9 +134,17 @@ class SimpleAgent:
             return {"error": "Нет OPENROUTER_API_KEY в .env"}
 
         self.history.append({"role": "user", "content": user_message})
+
+        # Механизм суммаризации: если история превышает WINDOW_SIZE
+        if len(self.history) > self.WINDOW_SIZE:
+            self._summarize_old_messages()
+
         self._save_state()
 
-        messages = [{"role": "system", "content": self.system_prompt}] + self.history
+        messages = [{"role": "system", "content": self.system_prompt}]
+        if self.summary_context:
+            messages.append({"role": "system", "content": f"Контекст предыдущей беседы: {self.summary_context}"})
+        messages += self.history
 
         url = "https://openrouter.ai/api/v1/chat/completions"
         body = {
@@ -157,12 +221,16 @@ class SimpleAgent:
             "total_tokens": total,
             "last_prompt_tokens": last_prompt,
             "cost": round(cost, 6),
-            "history_len": len(self.history)
+            "history_len": len(self.history),
+            "summary_context": self.summary_context,
+            "saved_tokens": self.saved_tokens
         }
 
     def get_state(self) -> dict:
         return {
             "history": self.history,
+            "summary_context": self.summary_context,
+            "saved_tokens": self.saved_tokens,
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,
