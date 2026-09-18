@@ -6,15 +6,11 @@ import urllib.error
 
 class SimpleAgent:
     MODEL_DEFAULT = "openrouter/free"
-    WINDOW_SIZE = 8
-    FAST_MODEL = "openai/gpt-4o-mini"
-
-    STRATEGY_SLIDING = "sliding"
-    STRATEGY_FACTS = "facts"
-    STRATEGY_BRANCHING = "branching"
+    WINDOW_SIZE = 6
+    FAST_MODEL = "cohere/north-mini-code:free"
 
     # Путь к файлу состояния относительно файла скрипта
-    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day10.json")
+    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day11.json")
 
     def __init__(self):
         self.history = []
@@ -25,10 +21,9 @@ class SimpleAgent:
         self.top_k = 0
         self.context_compression = True
 
-        self.strategy = self.STRATEGY_SLIDING
-        self.facts = {}
-        self.branches = {"main": []}
-        self.current_branch = "main"
+        # Трехуровневая система памяти
+        self.wm = {}   # Working Memory: текущая задача, активный контекст
+        self.ltm = {}  # Long-Term Memory: глобальные факты, профиль, предпочтения
 
         self.summary_context = ""
         self.saved_tokens = 0
@@ -40,10 +35,8 @@ class SimpleAgent:
             "history": self.history,
             "summary_context": self.summary_context,
             "saved_tokens": self.saved_tokens,
-            "strategy": self.strategy,
-            "facts": self.facts,
-            "branches": self.branches,
-            "current_branch": self.current_branch,
+            "wm": self.wm,
+            "ltm": self.ltm,
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,
@@ -51,7 +44,6 @@ class SimpleAgent:
                 "top_p": self.top_p,
                 "top_k": self.top_k,
                 "context_compression": self.context_compression,
-                "strategy": self.strategy
             },
             "stats": self.get_token_stats()
         }
@@ -71,19 +63,11 @@ class SimpleAgent:
                 state = json.load(f)
                 self.summary_context = state.get("summary_context", "")
                 self.saved_tokens = state.get("saved_tokens", 0)
-                self.facts = state.get("facts", {})
-                self.branches = state.get("branches", {"main": []})
-                self.current_branch = state.get("current_branch", "main")
+                self.wm = state.get("wm", {})
+                self.ltm = state.get("ltm", {})
+                self.history = state.get("history", [])
 
                 config = state.get("config", {})
-                self.strategy = config.get("strategy", state.get("strategy", self.STRATEGY_SLIDING))
-
-                # Если мы в режиме веток, history должна ссылаться на текущую ветку
-                if self.strategy == self.STRATEGY_BRANCHING:
-                    self.history = self.branches.get(self.current_branch, [])
-                else:
-                    self.history = state.get("history", [])
-
                 self.system_prompt = config.get("system_prompt", self.system_prompt)
                 self.model = config.get("model", self.model)
                 self.temperature = config.get("temperature", self.temperature)
@@ -100,142 +84,153 @@ class SimpleAgent:
         self.temperature = float(config.get("temperature", self.temperature))
         self.top_p = float(config.get("top_p", self.top_p))
         self.top_k = int(config.get("top_k", self.top_k))
-        self.context_compression = bool(config.get("context_compression", self.context_compression))
-
-        new_strategy = config.get("strategy")
-        if new_strategy in [self.STRATEGY_SLIDING, self.STRATEGY_FACTS, self.STRATEGY_BRANCHING]:
-            if self.strategy != new_strategy:
-                if new_strategy == self.STRATEGY_BRANCHING:
-                    self.branches = {"main": list(self.history)}
-                    self.current_branch = "main"
-                self.strategy = new_strategy
-
+        self.context_compression = config.get("context_compression", self.context_compression)
         self._save_state()
 
-    def clear_history(self, clear_branches: bool = False):
-        if clear_branches:
-            self.branches = {"main": []}
-            self.current_branch = "main"
-            self.history = self.branches["main"]
-            self.facts = {}
-            self.summary_context = ""
-            self.saved_tokens = 0
-        elif self.strategy == self.STRATEGY_BRANCHING:
-            self.branches[self.current_branch] = []
-            self.history = self.branches[self.current_branch]
-        else:
-            self.history = []
-            self.facts = {}
+    def clear_history(self, clear_all: bool = False):
+        self.history = []
+        if clear_all:
+            self.wm = {}
+            self.ltm = {}
             self.summary_context = ""
             self.saved_tokens = 0
         self._save_state()
 
-    def create_branch(self, name: str):
-        if self.strategy != self.STRATEGY_BRANCHING: return
-        self.branches[name] = list(self.history)
-        self.current_branch = name
-        self.history = self.branches[name]
+    def pin_to_ltm(self, key: str, value: str):
+        if key.strip():
+            self.ltm[key.strip()] = value.strip()
+            self._save_state()
+
+    def update_wm_manually(self, wm_dict: dict):
+        self.wm = wm_dict
         self._save_state()
 
-    def switch_branch(self, name: str):
-        if self.strategy != self.STRATEGY_BRANCHING: return
-        if name in self.branches:
-            self.current_branch = name
-            self.history = self.branches[name]
-            self._save_state()
+    def update_ltm_manually(self, ltm_dict: dict):
+        self.ltm = ltm_dict
+        self._save_state()
 
-    def delete_branch(self, name: str):
-        if self.strategy != self.STRATEGY_BRANCHING: return
-        if name == "main": return
-        if name in self.branches:
-            del self.branches[name]
-            if self.current_branch == name:
-                self.current_branch = "main"
-                self.history = self.branches["main"]
-            self._save_state()
-
-    def _update_facts(self, user_msg: str, assistant_msg: str):
+    def _route_memory(self, user_msg: str, assistant_msg: str):
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key: return
 
         prompt = (
-            "Извлеки ключевые факты (цели, ограничения, предпочтения, решения) из последнего обмена сообщениями. "
-            "Верни ТОЛЬКО JSON объект с обновленными фактами. "
-            "Если факт изменился, обнови его. Если появился новый, добавь. "
-            f"Текущие факты: {json.dumps(self.facts, ensure_ascii=False)}\n"
+            "Ты — менеджер многоуровневой памяти ИИ-агента.\n"
+            "Твоя задача — проанализировать последний обмен сообщениями между User и Assistant и обновить два слоя памяти:\n"
+            "1. Long-Term Memory (LTM): глобальные, постоянные факты о пользователе (имя, общие предпочтения, стек, принятые важные архитектурные решения, 'законы' проекта).\n"
+            "2. Working Memory (WM): блок активных данных текущей задачи (какой баг сейчас чиним, над какой конкретной проблемой работаем, список файлов, текущие вводные). "
+            "WM должна обновляться динамически! Если пользователь сменил задачу, уточнил или опроверг старые данные, обязательно сотри неактуальные или ошибочные ключи из WM, чтобы они не мешали.\n\n"
+            f"Текущая LTM: {json.dumps(self.ltm, ensure_ascii=False)}\n"
+            f"Текущая WM: {json.dumps(self.wm, ensure_ascii=False)}\n\n"
+            "Последний диалог:\n"
             f"User: {user_msg}\n"
-            f"Assistant: {assistant_msg}"
+            f"Assistant: {assistant_msg}\n\n"
+            "Верни ТОЛЬКО валидный JSON-объект со следующей структурой:\n"
+            "{\n"
+            "  \"ltm\": { ... обновленный плоский словарь ... },\n"
+            "  \"wm\": { ... обновленный плоский словарь ... }\n"
+            "}\n"
+            "Никакого другого текста, разметки markdown или пояснений."
         )
 
         url = "https://openrouter.ai/api/v1/chat/completions"
         body = {
             "model": self.FAST_MODEL,
-            "messages": [{"role": "system", "content": "Ты — экстрактор фактов. Возвращай только валидный JSON."},
-                         {"role": "user", "content": prompt}],
+            "messages": [
+                {"role": "system", "content": "Ты — эксперт по структурированию памяти агентов. Отвечаешь только чистым JSON без markdown."},
+                {"role": "user", "content": prompt}
+            ],
             "temperature": 0.1,
             "response_format": {"type": "json_object"}
         }
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "X-Title": "Day 10 Facts Extractor"
+            "X-Title": "Memory Router"
         }
+
+        print(f"\n=== [DEBUG] ROUTE MEMORY REQUEST ===")
+        print(f"URL: {url}")
+        print(f"Model: {body['model']}")
+        print(f"Body: {json.dumps(body, ensure_ascii=False, indent=2)}")
+        print("=====================================\n")
 
         try:
             req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=60) as res:
-                resp_data = json.loads(res.read().decode("utf-8"))
+            with urllib.request.urlopen(req, timeout=30) as res:
+                raw_res = res.read().decode("utf-8")
+                resp_data = json.loads(raw_res)
+
+                print(f"=== [DEBUG] ROUTE MEMORY RESPONSE ===")
+                print(json.dumps(resp_data, ensure_ascii=False, indent=2))
+                print("======================================\n")
+
                 if "choices" in resp_data:
-                    new_facts = json.loads(resp_data["choices"][0]["message"]["content"])
-                    self.facts.update(new_facts)
-                    print(f"[{time.strftime('%H:%M:%S')}] Facts updated: {len(self.facts)} keys")
+                    content = resp_data["choices"][0]["message"]["content"].strip()
+                    if content.startswith("```json"):
+                        content = content[7:]
+                    if content.endswith("```"):
+                        content = content[:-3]
+
+                    memory_data = json.loads(content.strip())
+                    if "ltm" in memory_data and isinstance(memory_data["ltm"], dict):
+                        self.ltm = memory_data["ltm"]
+                    if "wm" in memory_data and isinstance(memory_data["wm"], dict):
+                        self.wm = memory_data["wm"]
+                    print(f"[{time.strftime('%H:%M:%S')}] Memory routed successfully. LTM keys: {list(self.ltm.keys())}, WM keys: {list(self.wm.keys())}")
+        except urllib.error.HTTPError as e:
+            print(f"=== [DEBUG] ROUTE MEMORY HTTP ERROR ===")
+            print(f"Code: {e.code}")
+            try:
+                err_body = e.read().decode("utf-8")
+                print(f"Response body: {err_body}")
+            except Exception as read_err:
+                print(f"Could not read error body: {read_err}")
+            print("========================================\n")
         except Exception as e:
-            print(f"Facts update error: {e}")
-
-    def edit_message_and_branch(self, msg_index: int, new_content: str) -> dict:
-        if msg_index >= len(self.history):
-            return {"error": "Index out of range"}
-
-        prefix = self.history[:msg_index]
-        import datetime
-        branch_name = f"edit_{datetime.datetime.now().strftime('%m%d_%H%M%S')}"
-        self.branches[branch_name] = list(prefix)
-        self.current_branch = branch_name
-        self.history = self.branches[branch_name]
-        return self.chat(new_content)
-
-    def get_message_versions(self, msg_index: int) -> list:
-        if msg_index >= len(self.history): return []
-        prefix = self.history[:msg_index]
-        versions = []
-        for b_name, b_hist in self.branches.items():
-            if len(b_hist) > msg_index:
-                if b_hist[:msg_index] == prefix:
-                    versions.append(b_name)
-        return versions
+            print(f"=== [DEBUG] ROUTE MEMORY GENERAL ERROR ===")
+            print(f"Error: {str(e)}")
+            print("==========================================\n")
+        except Exception as e:
+            print(f"Memory routing error: {e}")
 
     def chat(self, user_message: str) -> dict:
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
             return {"error": "Нет OPENROUTER_API_KEY в .env"}
 
-        # 1. Сохраняем сообщение в историю
+        # 1. Сохраняем сообщение пользователя в историю
         self.history.append({"role": "user", "content": user_message})
         self._save_state()
 
-        # Формирование сообщений в зависимости от стратегии
-        messages = [{"role": "system", "content": self.system_prompt}]
-        active_history = self.history
+        # 2. Формируем системный промпт с правилами использования иконок памяти
+        sys_prompt_full = (
+            f"{self.system_prompt}\n\n"
+            "ИНСТРУКЦИЯ ПО ИСТОЧНИКАМ ЗНАНИЙ:\n"
+            "В твоем распоряжении находятся блоки Long-Term Memory (LTM) и Working Memory (WM).\n"
+            "Если при ответе пользователю ты опираешься на информацию или предпочтения из Long-Term Memory (LTM), ОБЯЗАТЕЛЬНО добавь в текст ответа иконку 🧠.\n"
+            "If при ответе ты используешь активный контекст текущей задачи из Working Memory (WM), ОБЯЗАТЕЛЬНО добавь в текст ответа иконку 🛠.\n"
+            "Иконки можно органично вплетать в текст или ставить в конце ответа."
+        )
 
-        if self.strategy == self.STRATEGY_SLIDING:
-            active_history = self.history[-self.WINDOW_SIZE:]
-        elif self.strategy == self.STRATEGY_FACTS:
-            if self.facts:
-                facts_str = "\n".join([f"- {k}: {v}" for k, v in self.facts.items()])
-                messages.append({"role": "system", "content": f"Ключевые факты диалога:\n{facts_str}"})
-            active_history = self.history[-self.WINDOW_SIZE:]
+        messages = [{"role": "system", "content": sys_prompt_full}]
 
-        messages += active_history
+        # Добавляем Long-Term Memory (LTM) как контекст
+        if self.ltm:
+            ltm_str = "\n".join([f"- {k}: {v}" for k, v in self.ltm.items()])
+            messages.append({"role": "system", "content": f"=== LONG-TERM MEMORY (LTM) ===\n{ltm_str}"})
+
+        # Добавляем Working Memory (WM) как контекст
+        if self.wm:
+            wm_str = "\n".join([f"- {k}: {v}" for k, v in self.wm.items()])
+            messages.append({"role": "system", "content": f"=== WORKING MEMORY (WM) ===\n{wm_str}"})
+
+        # Short-Term Memory (STM): Скользящее окно из последних WINDOW_SIZE реплик истории
+        # Исключаем последнее сообщение пользователя, так как оно добавится следом
+        stm_history = self.history[:-1][-self.WINDOW_SIZE:]
+        messages += stm_history
+
+        # Добавляем само последнее сообщение пользователя
+        messages.append({"role": "user", "content": user_message})
 
         url = "https://openrouter.ai/api/v1/chat/completions"
         body = {
@@ -253,7 +248,7 @@ class SimpleAgent:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": "http://localhost",
-            "X-Title": "Day 10 AI Agent"
+            "X-Title": "Day 11 Multi-Layer Memory Agent"
         }
 
         start_time = time.time()
@@ -278,8 +273,8 @@ class SimpleAgent:
                         "usage": usage
                     })
 
-                    if self.strategy == self.STRATEGY_FACTS:
-                        self._update_facts(user_message, answer)
+                    # Выполняем динамическую маршрутизацию памяти после ответа
+                    self._route_memory(user_message, answer)
 
                     self._save_state()
                     return {
@@ -316,30 +311,17 @@ class SimpleAgent:
             "history_len": len(self.history),
             "summary_context": self.summary_context,
             "saved_tokens": self.saved_tokens,
-            "strategy": self.strategy,
-            "facts": self.facts,
-            "current_branch": self.current_branch,
-            "branches": list(self.branches.keys())
+            "wm": self.wm,
+            "ltm": self.ltm
         }
 
     def get_state(self) -> dict:
-        history_with_versions = []
-        for i, msg in enumerate(self.history):
-            msg_copy = dict(msg)
-            if msg["role"] == "user":
-                versions = self.get_message_versions(i)
-                msg_copy["versions"] = versions
-                msg_copy["current_version_index"] = versions.index(self.current_branch) if self.current_branch in versions else 0
-            history_with_versions.append(msg_copy)
-
         return {
-            "history": history_with_versions,
+            "history": self.history,
             "summary_context": self.summary_context,
             "saved_tokens": self.saved_tokens,
-            "strategy": self.strategy,
-            "facts": self.facts,
-            "current_branch": self.current_branch,
-            "branches": list(self.branches.keys()),
+            "wm": self.wm,
+            "ltm": self.ltm,
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,
@@ -347,7 +329,6 @@ class SimpleAgent:
                 "top_p": self.top_p,
                 "top_k": self.top_k,
                 "context_compression": self.context_compression,
-                "strategy": self.strategy
             },
             "stats": self.get_token_stats()
         }
