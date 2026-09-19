@@ -10,7 +10,7 @@ class SimpleAgent:
     FAST_MODEL = "cohere/north-mini-code:free"
 
     # Путь к файлу состояния относительно файла скрипта
-    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day11.json")
+    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day12.json")
 
     def __init__(self):
         self.history = []
@@ -23,7 +23,30 @@ class SimpleAgent:
 
         # Трехуровневая система памяти
         self.wm = {}   # Working Memory: текущая задача, активный контекст
-        self.ltm = {}  # Long-Term Memory: глобальные факты, профиль, предпочтения
+        self.ltm = {}  # Long-Term Memory: глобальные факты, предпочтения
+
+        # День 12: Система персонализации и профилей пользователей
+        self.current_profile = "Android Developer"
+        self.profiles = {
+            "Android Developer": {
+                "role": "Старший Android-разработчик (Kotlin, Compose, Koin)",
+                "style": "Технический, лаконичный, без лишней 'воды', строго по делу.",
+                "format": "Только чистый Kotlin-код с лаконичными комментариями к неочевидным архитектурным моментам.",
+                "constraints": "Писать код строго с использованием Jetpack Compose, Type Hints, чистой архитектуры. Никакого Java-кода."
+            },
+            "Data Scientist": {
+                "role": "Эксперт по анализу данных и машинному обучению (Python, Pandas, ML)",
+                "style": "Академический, подробный, с разбором математической сути формул.",
+                "format": "Python-код (скрипты или jupyter-блоки) с развернутыми комментариями к каждой математической операции.",
+                "constraints": "Использовать только современные библиотеки (pandas, numpy, scikit-learn). Подробно расписывать логику обучения."
+            },
+            "Technical Writer": {
+                "role": "Профессиональный технический писатель и UX-копирайтер",
+                "style": "Литературный, понятный, структурированный, ориентированный на широкую аудиторию.",
+                "format": "Красиво размеченный Markdown (списки, таблицы, цитаты, блоки внимания). Код приводить только в виде коротких примеров.",
+                "constraints": "Запрещено отвечать сплошным неразмеченным текстом. Использовать только русский язык, избегать сложного сленга без пояснений."
+            }
+        }
 
         self.summary_context = ""
         self.saved_tokens = 0
@@ -37,6 +60,8 @@ class SimpleAgent:
             "saved_tokens": self.saved_tokens,
             "wm": self.wm,
             "ltm": self.ltm,
+            "current_profile": self.current_profile,
+            "profiles": self.profiles,
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,
@@ -66,6 +91,11 @@ class SimpleAgent:
                 self.wm = state.get("wm", {})
                 self.ltm = state.get("ltm", {})
                 self.history = state.get("history", [])
+
+                if "current_profile" in state:
+                    self.current_profile = state["current_profile"]
+                if "profiles" in state:
+                    self.profiles = state["profiles"]
 
                 config = state.get("config", {})
                 self.system_prompt = config.get("system_prompt", self.system_prompt)
@@ -109,6 +139,22 @@ class SimpleAgent:
         self.ltm = ltm_dict
         self._save_state()
 
+    def switch_profile(self, profile_name: str):
+        if profile_name in self.profiles:
+            self.current_profile = profile_name
+            self._save_state()
+
+    def save_profile_data(self, profile_name: str, data: dict):
+        if profile_name.strip():
+            self.profiles[profile_name.strip()] = {
+                "role": data.get("role", "").strip(),
+                "style": data.get("style", "").strip(),
+                "format": data.get("format", "").strip(),
+                "constraints": data.get("constraints", "").strip()
+            }
+            self.current_profile = profile_name.strip()
+            self._save_state()
+
     def _route_memory(self, user_msg: str, assistant_msg: str):
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key: return
@@ -136,11 +182,10 @@ class SimpleAgent:
         body = {
             "model": self.FAST_MODEL,
             "messages": [
-                {"role": "system", "content": "Ты — эксперт по структурированию памяти агентов. Отвечаешь только чистым JSON без markdown."},
+                {"role": "system", "content": "Ты — эксперт по структурированию памяти агентов. Отвечай строго валидным JSON-объектом."},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"}
+            "temperature": 0.1
         }
         headers = {
             "Content-Type": "application/json",
@@ -166,12 +211,12 @@ class SimpleAgent:
 
                 if "choices" in resp_data:
                     content = resp_data["choices"][0]["message"]["content"].strip()
-                    if content.startswith("```json"):
-                        content = content[7:]
-                    if content.endswith("```"):
-                        content = content[:-3]
+                    start_idx = content.find('{')
+                    end_idx = content.rfind('}')
+                    if start_idx != -1 and end_idx != -1:
+                        content = content[start_idx:end_idx+1]
 
-                    memory_data = json.loads(content.strip())
+                    memory_data = json.loads(content)
                     if "ltm" in memory_data and isinstance(memory_data["ltm"], dict):
                         self.ltm = memory_data["ltm"]
                     if "wm" in memory_data and isinstance(memory_data["wm"], dict):
@@ -180,18 +225,11 @@ class SimpleAgent:
         except urllib.error.HTTPError as e:
             print(f"=== [DEBUG] ROUTE MEMORY HTTP ERROR ===")
             print(f"Code: {e.code}")
-            try:
-                err_body = e.read().decode("utf-8")
-                print(f"Response body: {err_body}")
-            except Exception as read_err:
-                print(f"Could not read error body: {read_err}")
+            try: print(f"Response body: {e.read().decode('utf-8')}")
+            except: pass
             print("========================================\n")
         except Exception as e:
-            print(f"=== [DEBUG] ROUTE MEMORY GENERAL ERROR ===")
-            print(f"Error: {str(e)}")
-            print("==========================================\n")
-        except Exception as e:
-            print(f"Memory routing error: {e}")
+            print(f"=== [DEBUG] ROUTE MEMORY GENERAL ERROR ===\nError: {str(e)}\n==========================================\n")
 
     def chat(self, user_message: str) -> dict:
         api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -202,9 +240,22 @@ class SimpleAgent:
         self.history.append({"role": "user", "content": user_message})
         self._save_state()
 
-        # 2. Формируем системный промпт с правилами использования иконок памяти
+        # 2. Извлекаем активный профиль персонализации
+        profile = self.profiles.get(self.current_profile, {})
+        profile_context = (
+            f"=== АКТИВНЫЙ ПРОФИЛЬ ПЕРСОНАЛИЗАЦИИ: {self.current_profile} ===\n"
+            f"Твоя роль: {profile.get('role', 'Полезный ассистент')}\n"
+            f"Стиль общения: {profile.get('style', 'Обычный')}\n"
+            f"Формат ответов: {profile.get('format', 'Свободный')}\n"
+            f"Жесткие ограничения: {profile.get('constraints', 'Нет')}\n"
+            "===============================================================\n"
+            "Ты ОБЯЗАН строго и безукоризненно следовать роли, стилю, формату и ограничениям из данного профиля в каждом своем предложении!"
+        )
+
+        # 3. Формируем полный системный промпт
         sys_prompt_full = (
             f"{self.system_prompt}\n\n"
+            f"{profile_context}\n\n"
             "ИНСТРУКЦИЯ ПО ИСТОЧНИКАМ ЗНАНИЙ:\n"
             "В твоем распоряжении находятся блоки Long-Term Memory (LTM) и Working Memory (WM).\n"
             "Если при ответе пользователю ты опираешься на информацию или предпочтения из Long-Term Memory (LTM), ОБЯЗАТЕЛЬНО добавь в текст ответа иконку 🧠.\n"
@@ -225,7 +276,6 @@ class SimpleAgent:
             messages.append({"role": "system", "content": f"=== WORKING MEMORY (WM) ===\n{wm_str}"})
 
         # Short-Term Memory (STM): Скользящее окно из последних WINDOW_SIZE реплик истории
-        # Исключаем последнее сообщение пользователя, так как оно добавится следом
         stm_history = self.history[:-1][-self.WINDOW_SIZE:]
         messages += stm_history
 
@@ -248,7 +298,7 @@ class SimpleAgent:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": "http://localhost",
-            "X-Title": "Day 11 Multi-Layer Memory Agent"
+            "X-Title": "Day 12 Personalized Agent"
         }
 
         start_time = time.time()
@@ -287,12 +337,8 @@ class SimpleAgent:
                     }
                 return {"error": f"API Error: {json.dumps(resp_data)}"}
         except urllib.error.HTTPError as e:
-            try:
-                err_body = e.read().decode("utf-8")
-                err_json = json.loads(err_body)
-                return {"error": f"OpenRouter Error {e.code}: {err_json.get('error', {}).get('message', err_body)}"}
-            except:
-                return {"error": f"HTTP Error {e.code}: {str(e)}"}
+            try: return {"error": f"OpenRouter Error {e.code}: {json.loads(e.read().decode('utf-8')).get('error', {}).get('message')}"}
+            except: return {"error": f"HTTP Error {e.code}: {str(e)}"}
         except Exception as e:
             return {"error": str(e)}
 
@@ -312,7 +358,9 @@ class SimpleAgent:
             "summary_context": self.summary_context,
             "saved_tokens": self.saved_tokens,
             "wm": self.wm,
-            "ltm": self.ltm
+            "ltm": self.ltm,
+            "current_profile": self.current_profile,
+            "profiles": list(self.profiles.keys())
         }
 
     def get_state(self) -> dict:
@@ -322,6 +370,9 @@ class SimpleAgent:
             "saved_tokens": self.saved_tokens,
             "wm": self.wm,
             "ltm": self.ltm,
+            "current_profile": self.current_profile,
+            "profiles_list": list(self.profiles.keys()),
+            "current_profile_data": self.profiles.get(self.current_profile, {}),
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,
