@@ -10,7 +10,7 @@ class SimpleAgent:
     FAST_MODEL = "cohere/north-mini-code:free"
 
     # Путь к файлу состояния относительно файла скрипта
-    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day12.json")
+    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day13.json")
 
     def __init__(self):
         self.history = []
@@ -43,10 +43,15 @@ class SimpleAgent:
             "Technical Writer": {
                 "role": "Профессиональный технический писатель и UX-копирайтер",
                 "style": "Литературный, понятный, структурированный, ориентированный на широкую аудиторию.",
-                "format": "Красиво размеченный Markdown (списки, таблицы, цитаты, блоки внимания). Код приводить только в виде коротких примеров.",
+                "format": "Красиво размеченный Markdown (списки, таблицы, цитаты, blocks внимания). Код приводить только в виде коротких примеров.",
                 "constraints": "Запрещено отвечать сплошным неразмеченным текстом. Использовать только русский язык, избегать сложного сленга без пояснений."
             }
         }
+
+        # День 13: Конечный автомат задачи (Task State Machine)
+        self.tsm_stage = "none" # Возможные: none, planning, execution, validation, done
+        self.tsm_step = "Нет активной задачи"
+        self.tsm_action = "Ожидание постановки задачи пользователем"
 
         self.summary_context = ""
         self.saved_tokens = 0
@@ -62,6 +67,11 @@ class SimpleAgent:
             "ltm": self.ltm,
             "current_profile": self.current_profile,
             "profiles": self.profiles,
+            "tsm": {
+                "stage": self.tsm_stage,
+                "step": self.tsm_step,
+                "action": self.tsm_action
+            },
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,
@@ -97,6 +107,12 @@ class SimpleAgent:
                 if "profiles" in state:
                     self.profiles = state["profiles"]
 
+                if "tsm" in state:
+                    tsm = state["tsm"]
+                    self.tsm_stage = tsm.get("stage", "none")
+                    self.tsm_step = tsm.get("step", "Нет активной задачи")
+                    self.tsm_action = tsm.get("action", "Ожидание постановки задачи")
+
                 config = state.get("config", {})
                 self.system_prompt = config.get("system_prompt", self.system_prompt)
                 self.model = config.get("model", self.model)
@@ -122,6 +138,9 @@ class SimpleAgent:
         if clear_all:
             self.wm = {}
             self.ltm = {}
+            self.tsm_stage = "none"
+            self.tsm_step = "Нет активной задачи"
+            self.tsm_action = "Ожидание постановки задачи пользователем"
             self.summary_context = ""
             self.saved_tokens = 0
         self._save_state()
@@ -137,6 +156,12 @@ class SimpleAgent:
 
     def update_ltm_manually(self, ltm_dict: dict):
         self.ltm = ltm_dict
+        self._save_state()
+
+    def update_tsm_manually(self, stage: str, step: str, action: str):
+        self.tsm_stage = stage
+        self.tsm_step = step
+        self.tsm_action = action
         self._save_state()
 
     def switch_profile(self, profile_name: str):
@@ -160,20 +185,32 @@ class SimpleAgent:
         if not api_key: return
 
         prompt = (
-            "Ты — менеджер многоуровневой памяти ИИ-агента.\n"
-            "Твоя задача — проанализировать последний обмен сообщениями между User и Assistant и обновить два слоя памяти:\n"
-            "1. Long-Term Memory (LTM): глобальные, постоянные факты о пользователе (имя, общие предпочтения, стек, принятые важные архитектурные решения, 'законы' проекта).\n"
-            "2. Working Memory (WM): блок активных данных текущей задачи (какой баг сейчас чиним, над какой конкретной проблемой работаем, список файлов, текущие вводные). "
-            "WM должна обновляться динамически! Если пользователь сменил задачу, уточнил или опроверг старые данные, обязательно сотри неактуальные или ошибочные ключи из WM, чтобы они не мешали.\n\n"
+            "Ты — менеджер многоуровневой памяти и контроллер конечного автомата задач (Task State Machine) ИИ-агента.\n"
+            "Твоя задача — проанализировать последний обмен сообщениями между User и Assistant и обновить три структуры данных:\n"
+            "1. Long-Term Memory (LTM): глобальные, постоянные факты о пользователе (имя, общие предпочтения, стек, законы проекта).\n"
+            "2. Working Memory (WM): блок активных данных текущей задачи (какой баг чиним, список файлов, текущие вводные). WM обновляется динамически.\n"
+            "3. Task State Machine (TSM): текущее состояние конечного автомата выполнения задачи.\n"
+            "   Доступные этапы выполнения (stage):\n"
+            "   - \"none\": если конкретная техническая задача или цель еще не поставлена пользователем.\n"
+            "   - \"planning\": обсуждение архитектуры, составление плана выполнения, декомпозиция.\n"
+            "   - \"execution\": написание кода, генерация скриптов, непосредственное решение задачи.\n"
+            "   - \"validation\": тестирование, проверка багов, верификация написанного решения.\n"
+            "   - \"done\": задача успешно завершена и проверена.\n\n"
             f"Текущая LTM: {json.dumps(self.ltm, ensure_ascii=False)}\n"
-            f"Текущая WM: {json.dumps(self.wm, ensure_ascii=False)}\n\n"
+            f"Текущая WM: {json.dumps(self.wm, ensure_ascii=False)}\n"
+            f"Текущее состояние TSM: stage=\"{self.tsm_stage}\", step=\"{self.tsm_step}\", action=\"{self.tsm_action}\"\n\n"
             "Последний диалог:\n"
             f"User: {user_msg}\n"
             f"Assistant: {assistant_msg}\n\n"
             "Верни ТОЛЬКО валидный JSON-объект со следующей структурой:\n"
             "{\n"
             "  \"ltm\": { ... обновленный плоский словарь ... },\n"
-            "  \"wm\": { ... обновленный плоский словарь ... }\n"
+            "  \"wm\": { ... обновленный плоский словарь ... },\n"
+            "  \"tsm\": {\n"
+            "     \"stage\": \"... один из этапов выше ...\",\n"
+            "     \"step\": \"... краткое описание текущего выполняемого шага задачи ...\",\n"
+            "     \"action\": \"... ожидаемое следующее действие (от пользователя или агента) ...\"\n"
+            "  }\n"
             "}\n"
             "Никакого другого текста, разметки markdown или пояснений."
         )
@@ -182,7 +219,7 @@ class SimpleAgent:
         body = {
             "model": self.FAST_MODEL,
             "messages": [
-                {"role": "system", "content": "Ты — эксперт по структурированию памяти агентов. Отвечай строго валидным JSON-объектом."},
+                {"role": "system", "content": "Ты — эксперт по структурированию памяти и состояний агентов. Отвечаешь строго валидным JSON."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.1
@@ -190,14 +227,14 @@ class SimpleAgent:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "X-Title": "Memory Router"
+            "X-Title": "Memory and TSM Router"
         }
 
-        print(f"\n=== [DEBUG] ROUTE MEMORY REQUEST ===")
+        print(f"\n=== [DEBUG] ROUTE MEMORY & TSM REQUEST ===")
         print(f"URL: {url}")
         print(f"Model: {body['model']}")
         print(f"Body: {json.dumps(body, ensure_ascii=False, indent=2)}")
-        print("=====================================\n")
+        print("===========================================\n")
 
         try:
             req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
@@ -205,9 +242,9 @@ class SimpleAgent:
                 raw_res = res.read().decode("utf-8")
                 resp_data = json.loads(raw_res)
 
-                print(f"=== [DEBUG] ROUTE MEMORY RESPONSE ===")
+                print(f"=== [DEBUG] ROUTE MEMORY & TSM RESPONSE ===")
                 print(json.dumps(resp_data, ensure_ascii=False, indent=2))
-                print("======================================\n")
+                print("============================================\n")
 
                 if "choices" in resp_data:
                     content = resp_data["choices"][0]["message"]["content"].strip()
@@ -221,15 +258,16 @@ class SimpleAgent:
                         self.ltm = memory_data["ltm"]
                     if "wm" in memory_data and isinstance(memory_data["wm"], dict):
                         self.wm = memory_data["wm"]
-                    print(f"[{time.strftime('%H:%M:%S')}] Memory routed successfully. LTM keys: {list(self.ltm.keys())}, WM keys: {list(self.wm.keys())}")
+                    if "tsm" in memory_data and isinstance(memory_data["tsm"], dict):
+                        tsm_res = memory_data["tsm"]
+                        self.tsm_stage = tsm_res.get("stage", self.tsm_stage)
+                        self.tsm_step = tsm_res.get("step", self.tsm_step)
+                        self.tsm_action = tsm_res.get("action", self.tsm_action)
+                    print(f"[{time.strftime('%H:%M:%S')}] TSM & Memory routed successfully.")
         except urllib.error.HTTPError as e:
-            print(f"=== [DEBUG] ROUTE MEMORY HTTP ERROR ===")
-            print(f"Code: {e.code}")
-            try: print(f"Response body: {e.read().decode('utf-8')}")
-            except: pass
-            print("========================================\n")
+            print(f"=== [DEBUG] ROUTE TSM HTTP ERROR ===\nCode: {e.code}\n====================================\n")
         except Exception as e:
-            print(f"=== [DEBUG] ROUTE MEMORY GENERAL ERROR ===\nError: {str(e)}\n==========================================\n")
+            print(f"=== [DEBUG] ROUTE TSM GENERAL ERROR ===\nError: {str(e)}\n========================================\n")
 
     def chat(self, user_message: str) -> dict:
         api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -249,13 +287,25 @@ class SimpleAgent:
             f"Формат ответов: {profile.get('format', 'Свободный')}\n"
             f"Жесткие ограничения: {profile.get('constraints', 'Нет')}\n"
             "===============================================================\n"
-            "Ты ОБЯЗАН строго и безукоризненно следовать роли, стилю, формату и ограничениям из данного профиля в каждом своем предложении!"
         )
 
-        # 3. Формируем полный системный промпт
+        # 3. Инжектим Конечный автомат задачи (TSM) в системный промпт
+        tsm_context = (
+            f"=== ТЕКУЩЕЕ СОСТОЯНИЕ ВЫПОЛНЕНИЯ ЗАДАЧИ (TSM MACHINE) ===\n"
+            f"Этап конечного автомата (stage): {self.tsm_stage.upper()}\n"
+            f"Текущий шаг задачи (step): {self.tsm_step}\n"
+            f"Ожидаемое действие (action): {self.tsm_action}\n"
+            "===========================================================\n"
+            "Данный блок TSM фиксирует текущий статус выполнения. Если история диалога пуста или была стерта, "
+            "ориентируйся на этот блок TSM, чтобы продолжить выполнение задачи ровно с того места, где остановился, "
+            "без повторных расспросов и объяснений!"
+        )
+
+        # 4. Формируем полный системный промпт
         sys_prompt_full = (
             f"{self.system_prompt}\n\n"
             f"{profile_context}\n\n"
+            f"{tsm_context}\n\n"
             "ИНСТРУКЦИЯ ПО ИСТОЧНИКАМ ЗНАНИЙ:\n"
             "В твоем распоряжении находятся блоки Long-Term Memory (LTM) и Working Memory (WM).\n"
             "Если при ответе пользователю ты опираешься на информацию или предпочтения из Long-Term Memory (LTM), ОБЯЗАТЕЛЬНО добавь в текст ответа иконку 🧠.\n"
@@ -265,12 +315,10 @@ class SimpleAgent:
 
         messages = [{"role": "system", "content": sys_prompt_full}]
 
-        # Добавляем Long-Term Memory (LTM) как контекст
         if self.ltm:
             ltm_str = "\n".join([f"- {k}: {v}" for k, v in self.ltm.items()])
             messages.append({"role": "system", "content": f"=== LONG-TERM MEMORY (LTM) ===\n{ltm_str}"})
 
-        # Добавляем Working Memory (WM) как контекст
         if self.wm:
             wm_str = "\n".join([f"- {k}: {v}" for k, v in self.wm.items()])
             messages.append({"role": "system", "content": f"=== WORKING MEMORY (WM) ===\n{wm_str}"})
@@ -298,7 +346,7 @@ class SimpleAgent:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": "http://localhost",
-            "X-Title": "Day 12 Personalized Agent"
+            "X-Title": "Day 13 TSM Agent"
         }
 
         start_time = time.time()
@@ -323,7 +371,7 @@ class SimpleAgent:
                         "usage": usage
                     })
 
-                    # Выполняем динамическую маршрутизацию памяти после ответа
+                    # Выполняем динамическую маршрутизацию памяти и TSM после ответа
                     self._route_memory(user_message, answer)
 
                     self._save_state()
@@ -360,7 +408,9 @@ class SimpleAgent:
             "wm": self.wm,
             "ltm": self.ltm,
             "current_profile": self.current_profile,
-            "profiles": list(self.profiles.keys())
+            "tsm_stage": self.tsm_stage,
+            "tsm_step": self.tsm_step,
+            "tsm_action": self.tsm_action
         }
 
     def get_state(self) -> dict:
@@ -373,6 +423,11 @@ class SimpleAgent:
             "current_profile": self.current_profile,
             "profiles_list": list(self.profiles.keys()),
             "current_profile_data": self.profiles.get(self.current_profile, {}),
+            "tsm": {
+                "stage": self.tsm_stage,
+                "step": self.tsm_step,
+                "action": self.tsm_action
+            },
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,

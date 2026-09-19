@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""День 12: Персонализация ассистента поверх многоуровневой памяти.
-   Система настраиваемых профилей пользователей.
+"""День 13: Конечный автомат задачи (Task State Machine).
+   Управление и визуализация этапов planning -> execution -> validation -> done.
 """
 
 from __future__ import annotations
@@ -17,19 +17,54 @@ from simple_agent import SimpleAgent
 from chat_ui import get_chat_page
 
 ROOT = Path(__file__).resolve().parent
-PORT = 8012
+PORT = 8013
 _LOCK = threading.Lock()
 
 agent = SimpleAgent()
 
 SIDEBAR_STATS_HTML = """
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
-  <label style="font-weight: 600; display: block; margin-bottom: 5px; font-size: 0.85rem;">Профили:</label>
+  <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem;">🤖 Конечный автомат задачи (TSM):</label>
+
+  <!-- Пайплайн этапов -->
+  <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; margin-bottom: 8px; border: 1px solid var(--border);">
+    <span id="stageBadge_none" style="font-size: 0.65rem; padding: 2px 4px; border-radius: 3px; color: var(--text-dim); background: var(--bg-dark);">NONE</span>
+    <span style="color: var(--text-dim); font-size: 0.6rem;">➔</span>
+    <span id="stageBadge_planning" style="font-size: 0.65rem; padding: 2px 4px; border-radius: 3px; color: var(--text-dim); background: var(--bg-dark);">PLAN</span>
+    <span style="color: var(--text-dim); font-size: 0.6rem;">➔</span>
+    <span id="stageBadge_execution" style="font-size: 0.65rem; padding: 2px 4px; border-radius: 3px; color: var(--text-dim); background: var(--bg-dark);">EXEC</span>
+    <span style="color: var(--text-dim); font-size: 0.6rem;">➔</span>
+    <span id="stageBadge_validation" style="font-size: 0.65rem; padding: 2px 4px; border-radius: 3px; color: var(--text-dim); background: var(--bg-dark);">VALID</span>
+    <span style="color: var(--text-dim); font-size: 0.6rem;">➔</span>
+    <span id="stageBadge_done" style="font-size: 0.65rem; padding: 2px 4px; border-radius: 3px; color: var(--text-dim); background: var(--bg-dark);">DONE</span>
+  </div>
+
+  <div id="tsmDetailsBlock" style="background: rgba(255,255,255,0.03); border: 1px solid var(--border); padding: 8px; border-radius: 6px; font-size: 0.75rem; display: flex; flex-direction: column; gap: 4px; line-height: 1.4;">
+    <div><b style="color: var(--accent);">Текущий шаг:</b> <span id="tsmStepText" style="color: var(--text-main);"></span></div>
+    <div><b style="color: var(--accent);">Ожидаемое действие:</b> <span id="tsmActionText" style="color: var(--text-dim);"></span></div>
+  </div>
+
+  <!-- Панель ручного перевода автомата -->
+  <div style="display: flex; flex-direction: column; gap: 4px; background: rgba(0,0,0,0.15); padding: 6px; border-radius: 4px; border: 1px dashed var(--border); margin-top: 6px;">
+    <span style="font-size: 0.7rem; color: var(--text-dim); font-weight: bold;">Ручное управление TSM:</span>
+    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;">
+      <button onclick="forceTsmStage('planning')" style="padding: 3px; font-size: 0.65rem; background: var(--border); color: white; border: none; border-radius: 3px; cursor: pointer;">PLAN</button>
+      <button onclick="forceTsmStage('execution')" style="padding: 3px; font-size: 0.65rem; background: var(--border); color: white; border: none; border-radius: 3px; cursor: pointer;">EXEC</button>
+      <button onclick="forceTsmStage('validation')" style="padding: 3px; font-size: 0.65rem; background: var(--border); color: white; border: none; border-radius: 3px; cursor: pointer;">VALID</button>
+    </div>
+    <input type="text" id="manualTsmStep" placeholder="Изменить текущий шаг" class="input-field" style="font-size: 0.75rem; padding: 3px 6px; height: auto; margin-top: 2px;">
+    <input type="text" id="manualTsmAction" placeholder="Изменить ожидаемое действие" class="input-field" style="font-size: 0.75rem; padding: 3px 6px; height: auto;">
+    <button onclick="submitManualTsm()" style="padding: 4px; font-size: 0.75rem; background: var(--primary); border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: bold;">Принудительно обновить TSM</button>
+  </div>
+</div>
+
+<div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
+  <label style="font-weight: 600; display: block; margin-bottom: 5px; font-size: 0.85rem;">🎭 Персонализация и Профили:</label>
   <select id="profileSelect" class="input-field" style="font-size: 0.8rem; margin-bottom: 8px;">
     <!-- Профили загрузятся динамически -->
   </select>
 
-  <div id="profileDetailsBlock" style="background: rgba(255,255,255,0.03); border: 1px solid var(--border); padding: 8px; border-radius: 6px; font-size: 0.75rem; display: flex; flex-direction: column; gap: 5px;">
+  <div id="profileDetailsBlock" style="background: rgba(255,255,255,0.03); border: 1px solid var(--border); padding: 8px; border-radius: 6px; font-size: 0.75rem; display: flex; flex-direction: column; gap: 4px;">
     <div><b style="color: var(--accent);">Роль:</b> <span id="profRole" style="color: var(--text-main);"></span></div>
     <div><b style="color: var(--accent);">Стиль:</b> <span id="profStyle" style="color: var(--text-dim);"></span></div>
     <div><b style="color: var(--accent);">Формат:</b> <span id="profFormat" style="color: var(--text-dim);"></span></div>
@@ -43,32 +78,26 @@ SIDEBAR_STATS_HTML = """
 
   <div id="profileEditor" style="display: none; flex-direction: column; gap: 6px; margin-top: 8px; background: rgba(0,0,0,0.25); padding: 10px; border-radius: 6px; border: 1px dashed var(--accent);">
     <span id="editorTitle" style="font-size: 0.75rem; font-weight: bold; color: var(--accent); margin-bottom: 2px;">Редактор профиля:</span>
-
     <div style="display: flex; flex-direction: column; gap: 2px;">
       <label style="font-size: 0.65rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Название профиля</label>
-      <input type="text" id="editProfName" placeholder="Напр: Android Dev v2" class="input-field" style="font-size: 0.75rem; padding: 4px 6px; height: auto; background: var(--bg-dark); color: white; border: 1px solid var(--border); border-radius: 4px;">
+      <input type="text" id="editProfName" class="input-field" style="font-size: 0.75rem; padding: 4px 6px; height: auto;">
     </div>
-
     <div style="display: flex; flex-direction: column; gap: 2px;">
-      <label style="font-size: 0.65rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Роль / Системное описание</label>
-      <textarea id="editProfRole" placeholder="Напр: Эксперт по Kotlin..." class="input-field" style="font-size: 0.75rem; padding: 4px 6px; min-height: 40px; height: 40px; background: var(--bg-dark); color: white; border: 1px solid var(--border); border-radius: 4px; resize: vertical; font-family: inherit;"></textarea>
+      <label style="font-size: 0.65rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Роль</label>
+      <textarea id="editProfRole" class="input-field" style="font-size: 0.75rem; padding: 4px 6px; min-height: 40px; height: 40px; resize: vertical; font-family: inherit;"></textarea>
     </div>
-
     <div style="display: flex; flex-direction: column; gap: 2px;">
-      <label style="font-size: 0.65rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Стиль общения</label>
-      <textarea id="editProfStyle" placeholder="Напр: Лаконичный, технический..." class="input-field" style="font-size: 0.75rem; padding: 4px 6px; min-height: 40px; height: 40px; background: var(--bg-dark); color: white; border: 1px solid var(--border); border-radius: 4px; resize: vertical; font-family: inherit;"></textarea>
+      <label style="font-size: 0.65rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Стиль</label>
+      <textarea id="editProfStyle" class="input-field" style="font-size: 0.75rem; padding: 4px 6px; min-height: 40px; height: 40px; resize: vertical; font-family: inherit;"></textarea>
     </div>
-
     <div style="display: flex; flex-direction: column; gap: 2px;">
-      <label style="font-size: 0.65rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Формат ответов</label>
-      <textarea id="editProfFormat" placeholder="Напр: Чистый код без пояснений..." class="input-field" style="font-size: 0.75rem; padding: 4px 6px; min-height: 40px; height: 40px; background: var(--bg-dark); color: white; border: 1px solid var(--border); border-radius: 4px; resize: vertical; font-family: inherit;"></textarea>
+      <label style="font-size: 0.65rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Формат</label>
+      <textarea id="editProfFormat" class="input-field" style="font-size: 0.75rem; padding: 4px 6px; min-height: 40px; height: 40px; resize: vertical; font-family: inherit;"></textarea>
     </div>
-
     <div style="display: flex; flex-direction: column; gap: 2px;">
-      <label style="font-size: 0.65rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Жесткие ограничения</label>
-      <textarea id="editProfConstraints" placeholder="Напр: Запрещено использовать Java..." class="input-field" style="font-size: 0.75rem; padding: 4px 6px; min-height: 40px; height: 40px; background: var(--bg-dark); color: white; border: 1px solid var(--border); border-radius: 4px; resize: vertical; font-family: inherit;"></textarea>
+      <label style="font-size: 0.65rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Ограничения</label>
+      <textarea id="editProfConstraints" class="input-field" style="font-size: 0.75rem; padding: 4px 6px; min-height: 40px; height: 40px; resize: vertical; font-family: inherit;"></textarea>
     </div>
-
     <div style="display: flex; gap: 5px; margin-top: 5px;">
       <button onclick="saveProfileManual()" style="flex: 1; padding: 5px; font-size: 0.75rem; background: var(--primary); border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: bold;">Сохранить профиль</button>
       <button onclick="closeProfileEditor()" style="padding: 5px; font-size: 0.75rem; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 4px; color: white; cursor: pointer;">Отмена</button>
@@ -78,10 +107,9 @@ SIDEBAR_STATS_HTML = """
 
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
   <label style="font-weight: 600; display: block; margin-bottom: 5px; font-size: 0.85rem;">🧠 Long-Term Memory (LTM):</label>
-  <div id="ltmList" style="font-size: 0.75rem; color: var(--text-dim); background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; line-height: 1.4; max-height: 120px; overflow-y: auto; margin-bottom: 8px;">
+  <div id="ltmList" style="font-size: 0.75rem; color: var(--text-dim); background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; line-height: 1.4; max-height: 100px; overflow-y: auto; margin-bottom: 8px;">
     Нет долговременных фактов
   </div>
-
   <div style="display: flex; flex-direction: column; gap: 4px; background: rgba(0,0,0,0.2); padding: 6px; border-radius: 4px;">
     <input type="text" id="manualLtmKey" placeholder="Ключ памяти" class="input-field" style="font-size: 0.75rem; padding: 3px 6px; height: auto;">
     <input type="text" id="manualLtmVal" placeholder="Значение" class="input-field" style="font-size: 0.75rem; padding: 3px 6px; height: auto;">
@@ -93,13 +121,6 @@ SIDEBAR_STATS_HTML = """
   <label style="font-weight: 600; display: block; margin-bottom: 5px; font-size: 0.85rem;">🛠 Working Memory (WM):</label>
   <div id="wmList" style="font-size: 0.75rem; color: var(--text-dim); background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; line-height: 1.4; max-height: 100px; overflow-y: auto;">
     Нет активных данных задачи
-  </div>
-</div>
-
-<div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
-  <label style="font-weight: 600; display: block; margin-bottom: 5px; font-size: 0.85rem;">⏱ Short-Term Memory (STM):</label>
-  <div id="stmStatus" style="font-size: 0.75rem; color: var(--text-dim); background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; line-height: 1.4;">
-    Записей в STM: 0 (Окно: 6 реплик)
   </div>
 </div>
 
@@ -129,13 +150,50 @@ document.getElementById('profileSelect').addEventListener('change', function() {
     switchUserProfile(this.value);
 });
 
+let forcedStage = null;
+
+function forceTsmStage(stage) {
+    forcedStage = stage;
+    // Сбросим стили всех бейджей и подсветим выбранный
+    ['none', 'planning', 'execution', 'validation', 'done'].forEach(s => {
+        document.getElementById('stageBadge_' + s).style.background = 'var(--bg-dark)';
+        document.getElementById('stageBadge_' + s).style.color = 'var(--text-dim)';
+    });
+    const activeColors = {
+        planning: { bg: 'rgba(234, 179, 8, 0.2)', text: '#fde047' },
+        execution: { bg: 'rgba(99, 102, 241, 0.2)', text: '#a5b4fc' },
+        validation: { bg: 'rgba(168, 85, 247, 0.2)', text: '#d8b4fe' },
+        done: { bg: 'rgba(34, 197, 94, 0.2)', text: '#86efac' }
+    };
+    if (activeColors[stage]) {
+        document.getElementById('stageBadge_' + stage).style.background = activeColors[stage].bg;
+        document.getElementById('stageBadge_' + stage).style.color = activeColors[stage].text;
+    }
+}
+
+async function submitManualTsm() {
+    const stage = forcedStage || 'none';
+    const step = document.getElementById('manualTsmStep').value.trim();
+    const action = document.getElementById('manualTsmAction').value.trim();
+
+    const response = await fetch('/api/tsm/update', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({stage: stage, step: step, action: action})
+    });
+    if (response.ok) {
+        document.getElementById('manualTsmStep').value = '';
+        document.getElementById('manualTsmAction').value = '';
+        forcedStage = null;
+        refreshUI();
+    }
+}
+
 function openEditorForUpdate() {
     document.getElementById('profileEditor').style.display = 'flex';
     document.getElementById('editorTitle').textContent = "📝 Редактировать профиль:";
-
     document.getElementById('editProfName').value = document.getElementById('profileSelect').value;
-    document.getElementById('editProfName').disabled = true; // Запрещаем менять имя пресета при обновлении
-
+    document.getElementById('editProfName').disabled = true;
     document.getElementById('editProfRole').value = document.getElementById('profRole').textContent;
     document.getElementById('editProfStyle').value = document.getElementById('profStyle').textContent;
     document.getElementById('editProfFormat').value = document.getElementById('profFormat').textContent;
@@ -145,10 +203,8 @@ function openEditorForUpdate() {
 function openEditorForCreate() {
     document.getElementById('profileEditor').style.display = 'flex';
     document.getElementById('editorTitle').textContent = "✨ Создать новый профиль:";
-
     document.getElementById('editProfName').value = "";
     document.getElementById('editProfName').disabled = false;
-
     document.getElementById('editProfRole').value = "";
     document.getElementById('editProfStyle').value = "";
     document.getElementById('editProfFormat').value = "";
@@ -207,7 +263,6 @@ async function refreshUI() {
             document.getElementById('topKVal').textContent = document.getElementById('topKSlider').value;
         }
 
-        // Рендеринг списка профилей
         if (state.profiles_list) {
             const sel = document.getElementById('profileSelect');
             const active = state.current_profile || 'Android Developer';
@@ -221,13 +276,41 @@ async function refreshUI() {
             });
         }
 
-        // Отображение деталей активного профиля
         if (state.current_profile_data) {
             const d = state.current_profile_data;
             document.getElementById('profRole').textContent = d.role || 'Нет';
             document.getElementById('profStyle').textContent = d.style || 'Нет';
             document.getElementById('profFormat').textContent = d.format || 'Нет';
             document.getElementById('profConstraints').textContent = d.constraints || 'Нет';
+        }
+
+        // Рендеринг TSM данных и подсветка этапа
+        if (state.tsm) {
+            const t = state.tsm;
+            document.getElementById('tsmStepText').textContent = t.step || 'Нет активного шага';
+            document.getElementById('tsmActionText').textContent = t.action || 'Нет ожидаемого действия';
+
+            // Сброс всех
+            ['none', 'planning', 'execution', 'validation', 'done'].forEach(s => {
+                document.getElementById('stageBadge_' + s).style.background = 'var(--bg-dark)';
+                document.getElementById('stageBadge_' + s).style.color = 'var(--text-dim)';
+                document.getElementById('stageBadge_' + s).style.fontWeight = 'normal';
+            });
+
+            const activeColors = {
+                none: { bg: 'rgba(255,255,255,0.05)', text: 'var(--text-dim)' },
+                planning: { bg: 'rgba(234, 179, 8, 0.2)', text: '#fde047' },
+                execution: { bg: 'rgba(99, 102, 241, 0.2)', text: '#a5b4fc' },
+                validation: { bg: 'rgba(168, 85, 247, 0.2)', text: '#d8b4fe' },
+                done: { bg: 'rgba(34, 197, 94, 0.2)', text: '#86efac' }
+            };
+            const currentStage = t.stage || 'none';
+            if (activeColors[currentStage]) {
+                const badge = document.getElementById('stageBadge_' + currentStage);
+                badge.style.background = activeColors[currentStage].bg;
+                badge.style.color = activeColors[currentStage].text;
+                badge.style.fontWeight = 'bold';
+            }
         }
 
         chatLog.innerHTML = '';
@@ -238,7 +321,7 @@ async function refreshUI() {
                 addMessage(isBot ? 'bot' : 'user', m.content, meta);
             });
         } else {
-            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! Я твой глубоко персонализированный агент. Выберите профиль в Sidebar, чтобы увидеть магию автоматической адаптации стилей! 🎭</div></div>';
+            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! Я твой агент с поддержкой Конечного автомата задач (TSM). Поставь мне задачу, и ты увидишь этапы проектирования, кодинга и тестирования в реальном времени! 🤖</div></div>';
         }
 
         if (state.stats) updateMemoryStats(state.stats);
@@ -369,13 +452,13 @@ chatForm.onsubmit = async (e) => {
 };
 
 clearChat = async function() {
-  if (!confirm('Очистить историю чата? (Профили и память сохранятся)')) return;
+  if (!confirm('Очистить историю чата? (Профили, TSM и память сохранятся)')) return;
   await fetch('/api/clear', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({clear_all: false}) });
   refreshUI();
 };
 
 resetAllData = async function() {
-  if (!confirm('🚨 Сбросить ВСЕ данные? Это удалит историю чата, WM, LTM и сбросит профили!')) return;
+  if (!confirm('🚨 Сбросить ВСЕ данные? Это удалит историю чата, WM, LTM, профили и TSM автомат!')) return;
   await fetch('/api/clear', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({clear_all: true}) });
   refreshUI();
 };
@@ -395,7 +478,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
 
         page_html = get_chat_page(
-            title="Personalized Agent — День 12",
+            title="Task State Machine Agent — День 13",
             extra_sidebar_html=SIDEBAR_STATS_HTML,
             extra_scripts=EXTRA_SCRIPTS
         )
@@ -451,6 +534,12 @@ class Handler(BaseHTTPRequestHandler):
                     agent.save_profile_data(data.get("name", ""), data.get("data", {}))
                 self._send_json({"status": "profile_saved"})
 
+            elif path == "/api/tsm/update":
+                data = json.loads(raw_body)
+                with _LOCK:
+                    agent.update_tsm_manually(data.get("stage", "none"), data.get("step", ""), data.get("action", ""))
+                self._send_json({"status": "tsm_updated"})
+
             else:
                 self.send_error(404)
         except Exception as e:
@@ -477,7 +566,7 @@ def load_env() -> None:
 
 if __name__ == "__main__":
     load_env()
-    print(f"🚀 День 12 Персонализация ассистента: http://127.0.0.1:{PORT}")
+    print(f"🚀 День 13 Конечный автомат задачи (TSM): http://127.0.0.1:{PORT}")
     try:
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
     except KeyboardInterrupt:
