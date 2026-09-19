@@ -10,7 +10,7 @@ class SimpleAgent:
     FAST_MODEL = "cohere/north-mini-code:free"
 
     # Путь к файлу состояния относительно файла скрипта
-    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day13.json")
+    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day14.json")
 
     def __init__(self):
         self.history = []
@@ -49,9 +49,17 @@ class SimpleAgent:
         }
 
         # День 13: Конечный автомат задачи (Task State Machine)
-        self.tsm_stage = "none" # Возможные: none, planning, execution, validation, done
+        self.tsm_stage = "none"
         self.tsm_step = "Нет активной задачи"
         self.tsm_action = "Ожидание постановки задачи пользователем"
+
+        # День 14: Жесткие инварианты и архитектурные ограничения проекта
+        self.invariants = {
+            "Архитектура": "Strict MVI (Model-View-Intent) с однонаправленным потоком данных (UDF). Любые сайд-эффекты оборачивать в News/Effects.",
+            "Стек проекта": "Только чистый Kotlin, Jetpack Compose для UI и Koin для Dependency Injection. Использование Java или устаревших XML Layouts КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.",
+            "Безопасность": "Запрещено логировать, сохранять в plain-text или передавать на сторонние сервера пароли, токены и приватные ключи пользователей.",
+            "Бизнес-правило": "Все финансовые транзакции и операции с балансом пользователя должны проходить обязательную двойную верификацию локально перед отправкой в сеть."
+        }
 
         self.summary_context = ""
         self.saved_tokens = 0
@@ -72,6 +80,7 @@ class SimpleAgent:
                 "step": self.tsm_step,
                 "action": self.tsm_action
             },
+            "invariants": self.invariants,
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,
@@ -113,6 +122,9 @@ class SimpleAgent:
                     self.tsm_step = tsm.get("step", "Нет активной задачи")
                     self.tsm_action = tsm.get("action", "Ожидание постановки задачи")
 
+                if "invariants" in state:
+                    self.invariants = state["invariants"]
+
                 config = state.get("config", {})
                 self.system_prompt = config.get("system_prompt", self.system_prompt)
                 self.model = config.get("model", self.model)
@@ -141,6 +153,12 @@ class SimpleAgent:
             self.tsm_stage = "none"
             self.tsm_step = "Нет активной задачи"
             self.tsm_action = "Ожидание постановки задачи пользователем"
+            self.invariants = {
+                "Архитектура": "Strict MVI (Model-View-Intent) с однонаправленным потоком данных (UDF). Любые сайд-эфэфкты оборачивать в News/Effects.",
+                "Стек проекта": "Только чистый Kotlin, Jetpack Compose для UI и Koin для Dependency Injection. Использование Java или устаревших XML Layouts КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.",
+                "Безопасность": "Запрещено логировать, сохранять в plain-text или передавать на сторонние сервера пароли, токены и приватные ключи пользователей.",
+                "Бизнес-правило": "Все финансовые транзакции и операции с балансом пользователя должны проходить обязательную двойную верификацию локально перед отправкой в сеть."
+            }
             self.summary_context = ""
             self.saved_tokens = 0
         self._save_state()
@@ -164,6 +182,16 @@ class SimpleAgent:
         self.tsm_action = action
         self._save_state()
 
+    def pin_invariant(self, key: str, value: str):
+        if key.strip():
+            self.invariants[key.strip()] = value.strip()
+            self._save_state()
+
+    def delete_invariant(self, key: str):
+        if key in self.invariants:
+            del self.invariants[key]
+            self._save_state()
+
     def switch_profile(self, profile_name: str):
         if profile_name in self.profiles:
             self.current_profile = profile_name
@@ -185,7 +213,7 @@ class SimpleAgent:
         if not api_key: return
 
         prompt = (
-            "Ты — менеджер многоуровневой памяти и контроллер конечного автомата задач (Task State Machine) ИИ-агента.\n"
+            "Ты — менеджер многоуровневой памяти и контроллер конечного автомата задач (TSM) ИИ-агента.\n"
             "Твоя задача — проанализировать последний обмен сообщениями между User и Assistant и обновить три структуры данных:\n"
             "1. Long-Term Memory (LTM): глобальные, постоянные факты о пользователе (имя, общие предпочтения, стек, законы проекта).\n"
             "2. Working Memory (WM): блок активных данных текущей задачи (какой баг чиним, список файлов, текущие вводные). WM обновляется динамически.\n"
@@ -231,8 +259,6 @@ class SimpleAgent:
         }
 
         print(f"\n=== [DEBUG] ROUTE MEMORY & TSM REQUEST ===")
-        print(f"URL: {url}")
-        print(f"Model: {body['model']}")
         print(f"Body: {json.dumps(body, ensure_ascii=False, indent=2)}")
         print("===========================================\n")
 
@@ -278,34 +304,47 @@ class SimpleAgent:
         self.history.append({"role": "user", "content": user_message})
         self._save_state()
 
-        # 2. Извлекаем активный профиль персонализации
+        # 2. Формируем строку жестких инвариантов проекта (День 14)
+        inv_str = "НЕТ"
+        if self.invariants:
+            inv_str = "\n".join([f"🔴 [ЗАКОН] {k}: {v}" for k, v in self.invariants.items()])
+
+        # 3. Извлекаем активный профиль персонализации
         profile = self.profiles.get(self.current_profile, {})
         profile_context = (
             f"=== АКТИВНЫЙ ПРОФИЛЬ ПЕРСОНАЛИЗАЦИИ: {self.current_profile} ===\n"
             f"Твоя роль: {profile.get('role', 'Полезный ассистент')}\n"
             f"Стиль общения: {profile.get('style', 'Обычный')}\n"
             f"Формат ответов: {profile.get('format', 'Свободный')}\n"
-            f"Жесткие ограничения: {profile.get('constraints', 'Нет')}\n"
+            f"Жесткие ограничения профиля: {profile.get('constraints', 'Нет')}\n"
             "===============================================================\n"
         )
 
-        # 3. Инжектим Конечный автомат задачи (TSM) в системный промпт
-        tsm_context = (
+        # 4. Инжектим Конечный автомат задачи (TSM)
+        tm_context = (
             f"=== ТЕКУЩЕЕ СОСТОЯНИЕ ВЫПОЛНЕНИЯ ЗАДАЧИ (TSM MACHINE) ===\n"
             f"Этап конечного автомата (stage): {self.tsm_stage.upper()}\n"
             f"Текущий шаг задачи (step): {self.tsm_step}\n"
             f"Ожидаемое действие (action): {self.tsm_action}\n"
             "===========================================================\n"
-            "Данный блок TSM фиксирует текущий статус выполнения. Если история диалога пуста или была стерта, "
-            "ориентируйся на этот блок TSM, чтобы продолжить выполнение задачи ровно с того места, где остановился, "
-            "без повторных расспросов и объяснений!"
         )
 
-        # 4. Формируем полный системный промпт
+        # 5. Собираем супер-приоритетный системный промпт с инвариантами
         sys_prompt_full = (
             f"{self.system_prompt}\n\n"
+            f"🛑🛑🛑 КРИТИЧЕСКИЕ СИСТЕМНЫЕ ИНВАРИАНТЫ (ВЫСШИЕ ЗАКОНЫ ПРОЕКТА) 🛑🛑🛑\n"
+            "Ниже приведены жесткие правила и инварианты, которые ты НЕ ИМЕЕШЬ ПРАВА нарушать ни при каких условиях.\n"
+            f"{inv_str}\n"
+            "⚠️ ПРАВИЛО КРИТИЧЕСКОЙ ВАЛИДАЦИИ:\n"
+            "Перед формированием ответа сопоставь запрос пользователя с инвариантами проекта выше.\n"
+            "Если пользователь просит написать код, совершить операцию или предложить архитектурное решение, которое прямо или косвенно НАРУШАЕТ хотя бы один закон — ты ОБЯЗАН:\n"
+            "1. КАТЕГОРИЧЕСКИ, но вежливо ОТКАЗАТЬСЯ от выполнения данного запроса.\n"
+            "2. В ответе явно написать фразу: '❌ ОТКАЗ ВЫПОЛНЕНИЯ: Нарушение инварианта проекта'.\n"
+            "3. Подробно объяснить пользователю, какой именно инвариант нарушен и почему такое действие недопустимо в рамках проекта.\n"
+            "НИКАКИХ альтернативных решений или предложений на другом стеке генерировать НЕ НУЖНО. Только отказ и объяснение причины.\n"
+            "🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑\n\n"
             f"{profile_context}\n\n"
-            f"{tsm_context}\n\n"
+            f"{tm_context}\n\n"
             "ИНСТРУКЦИЯ ПО ИСТОЧНИКАМ ЗНАНИЙ:\n"
             "В твоем распоряжении находятся блоки Long-Term Memory (LTM) и Working Memory (WM).\n"
             "Если при ответе пользователю ты опираешься на информацию или предпочтения из Long-Term Memory (LTM), ОБЯЗАТЕЛЬНО добавь в текст ответа иконку 🧠.\n"
@@ -323,11 +362,11 @@ class SimpleAgent:
             wm_str = "\n".join([f"- {k}: {v}" for k, v in self.wm.items()])
             messages.append({"role": "system", "content": f"=== WORKING MEMORY (WM) ===\n{wm_str}"})
 
-        # Short-Term Memory (STM): Скользящее окно из последних WINDOW_SIZE реплик истории
+        # Short-Term Memory (STM)
         stm_history = self.history[:-1][-self.WINDOW_SIZE:]
         messages += stm_history
 
-        # Добавляем само последнее сообщение пользователя
+        # Добавляем последнее сообщение пользователя
         messages.append({"role": "user", "content": user_message})
 
         url = "https://openrouter.ai/api/v1/chat/completions"
@@ -346,7 +385,7 @@ class SimpleAgent:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": "http://localhost",
-            "X-Title": "Day 13 TSM Agent"
+            "X-Title": "Day 14 Invariant Agent"
         }
 
         start_time = time.time()
@@ -410,7 +449,8 @@ class SimpleAgent:
             "current_profile": self.current_profile,
             "tsm_stage": self.tsm_stage,
             "tsm_step": self.tsm_step,
-            "tsm_action": self.tsm_action
+            "tsm_action": self.tsm_action,
+            "invariants": self.invariants
         }
 
     def get_state(self) -> dict:
@@ -428,6 +468,7 @@ class SimpleAgent:
                 "step": self.tsm_step,
                 "action": self.tsm_action
             },
+            "invariants": self.invariants,
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,
