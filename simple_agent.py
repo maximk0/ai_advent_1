@@ -9,8 +9,17 @@ class SimpleAgent:
     WINDOW_SIZE = 6
     FAST_MODEL = "cohere/north-mini-code:free"
 
+    # День 15: Определение разрешенных переходов конечного автомата
+    TSM_ALLOWED_TRANSITIONS = {
+        "none": ["planning"],
+        "planning": ["execution", "none"],
+        "execution": ["validation", "planning"],
+        "validation": ["done", "execution", "planning"],
+        "done": ["planning", "none"]
+    }
+
     # Путь к файлу состояния относительно файла скрипта
-    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day14.json")
+    STATE_FILE = os.path.join(os.path.dirname(__file__), "history_day15.json")
 
     def __init__(self):
         self.history = []
@@ -154,7 +163,7 @@ class SimpleAgent:
             self.tsm_step = "Нет активной задачи"
             self.tsm_action = "Ожидание постановки задачи пользователем"
             self.invariants = {
-                "Архитектура": "Strict MVI (Model-View-Intent) с однонаправленным потоком данных (UDF). Любые сайд-эфэфкты оборачивать в News/Effects.",
+                "Архитектура": "Strict MVI (Model-View-Intent) с однонаправленным потоком данных (UDF). Любые сайд-эффекты оборачивать в News/Effects.",
                 "Стек проекта": "Только чистый Kotlin, Jetpack Compose для UI и Koin для Dependency Injection. Использование Java или устаревших XML Layouts КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.",
                 "Безопасность": "Запрещено логировать, сохранять в plain-text или передавать на сторонние сервера пароли, токены и приватные ключи пользователей.",
                 "Бизнес-правило": "Все финансовые транзакции и операции с балансом пользователя должны проходить обязательную двойную верификацию локально перед отправкой в сеть."
@@ -208,22 +217,31 @@ class SimpleAgent:
             self.current_profile = profile_name.strip()
             self._save_state()
 
+    def is_transition_allowed(self, new_stage: str) -> bool:
+        if new_stage == self.tsm_stage: return True
+        allowed = self.TSM_ALLOWED_TRANSITIONS.get(self.tsm_stage, [])
+        return new_stage in allowed
+
     def _route_memory(self, user_msg: str, assistant_msg: str):
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key: return
 
         prompt = (
             "Ты — менеджер многоуровневой памяти и контроллер конечного автомата задач (TSM) ИИ-агента.\n"
-            "Твоя задача — проанализировать последний обмен сообщениями между User и Assistant и обновить три структуры данных:\n"
-            "1. Long-Term Memory (LTM): глобальные, постоянные факты о пользователе (имя, общие предпочтения, стек, законы проекта).\n"
-            "2. Working Memory (WM): блок активных данных текущей задачи (какой баг чиним, список файлов, текущие вводные). WM обновляется динамически.\n"
-            "3. Task State Machine (TSM): текущее состояние конечного автомата выполнения задачи.\n"
-            "   Доступные этапы выполнения (stage):\n"
-            "   - \"none\": если конкретная техническая задача или цель еще не поставлена пользователем.\n"
-            "   - \"planning\": обсуждение архитектуры, составление плана выполнения, декомпозиция.\n"
-            "   - \"execution\": написание кода, генерация скриптов, непосредственное решение задачи.\n"
-            "   - \"validation\": тестирование, проверка багов, верификация написанного решения.\n"
-            "   - \"done\": задача успешно завершена и проверена.\n\n"
+            "Твоя задача — проанализировать последний обмен сообщениями и обновить три структуры данных:\n"
+            "1. Long-Term Memory (LTM): глобальные, постоянные факты.\n"
+            "2. Working Memory (WM): блок активных данных текущей задачи.\n"
+            "3. Task State Machine (TSM): текущее состояние конечного автомата.\n"
+            "   ДОСТУПНЫЕ ЭТАПЫ (stage):\n"
+            "   - \"none\": задача еще не поставлена.\n"
+            "   - \"planning\": обсуждение архитектуры и составление плана.\n"
+            "   - \"execution\": написание кода, непосредственное решение.\n"
+            "   - \"validation\": тестирование и верификация решения.\n"
+            "   - \"done\": задача завершена.\n\n"
+            "   СТРОГИЕ ПРАВИЛА ПЕРЕХОДОВ:\n"
+            f"   Текущий этап: {self.tsm_stage}\n"
+            f"   Разрешенные следующие этапы: {', '.join(self.TSM_ALLOWED_TRANSITIONS.get(self.tsm_stage, []))}\n"
+            "   Ты НЕ ИМЕЕШЬ ПРАВА перепрыгивать этапы. Например, нельзя перейти в 'execution', если сейчас 'none' или 'planning' еще не завершен.\n\n"
             f"Текущая LTM: {json.dumps(self.ltm, ensure_ascii=False)}\n"
             f"Текущая WM: {json.dumps(self.wm, ensure_ascii=False)}\n"
             f"Текущее состояние TSM: stage=\"{self.tsm_stage}\", step=\"{self.tsm_step}\", action=\"{self.tsm_action}\"\n\n"
@@ -232,22 +250,21 @@ class SimpleAgent:
             f"Assistant: {assistant_msg}\n\n"
             "Верни ТОЛЬКО валидный JSON-объект со следующей структурой:\n"
             "{\n"
-            "  \"ltm\": { ... обновленный плоский словарь ... },\n"
-            "  \"wm\": { ... обновленный плоский словарь ... },\n"
+            "  \"ltm\": { ... },\n"
+            "  \"wm\": { ... },\n"
             "  \"tsm\": {\n"
-            "     \"stage\": \"... один из этапов выше ...\",\n"
-            "     \"step\": \"... краткое описание текущего выполняемого шага задачи ...\",\n"
-            "     \"action\": \"... ожидаемое следующее действие (от пользователя или агента) ...\"\n"
+            "     \"stage\": \"... строго из списка разрешенных или текущий ...\",\n"
+            "     \"step\": \"... описание текущего шага ...\",\n"
+            "     \"action\": \"... ожидаемое следующее действие ...\"\n"
             "  }\n"
             "}\n"
-            "Никакого другого текста, разметки markdown или пояснений."
         )
 
         url = "https://openrouter.ai/api/v1/chat/completions"
         body = {
             "model": self.FAST_MODEL,
             "messages": [
-                {"role": "system", "content": "Ты — эксперт по структурированию памяти и состояний агентов. Отвечаешь строго валидным JSON."},
+                {"role": "system", "content": "Ты — эксперт по структурированию памяти и состояний. Отвечаешь строго валидным JSON без markdown."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.1
@@ -255,22 +272,14 @@ class SimpleAgent:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "X-Title": "Memory and TSM Router"
+            "X-Title": "Controlled TSM Router"
         }
-
-        print(f"\n=== [DEBUG] ROUTE MEMORY & TSM REQUEST ===")
-        print(f"Body: {json.dumps(body, ensure_ascii=False, indent=2)}")
-        print("===========================================\n")
 
         try:
             req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=30) as res:
                 raw_res = res.read().decode("utf-8")
                 resp_data = json.loads(raw_res)
-
-                print(f"=== [DEBUG] ROUTE MEMORY & TSM RESPONSE ===")
-                print(json.dumps(resp_data, ensure_ascii=False, indent=2))
-                print("============================================\n")
 
                 if "choices" in resp_data:
                     content = resp_data["choices"][0]["message"]["content"].strip()
@@ -280,20 +289,21 @@ class SimpleAgent:
                         content = content[start_idx:end_idx+1]
 
                     memory_data = json.loads(content)
-                    if "ltm" in memory_data and isinstance(memory_data["ltm"], dict):
-                        self.ltm = memory_data["ltm"]
-                    if "wm" in memory_data and isinstance(memory_data["wm"], dict):
-                        self.wm = memory_data["wm"]
-                    if "tsm" in memory_data and isinstance(memory_data["tsm"], dict):
+                    if "ltm" in memory_data: self.ltm = memory_data["ltm"]
+                    if "wm" in memory_data: self.wm = memory_data["wm"]
+                    if "tsm" in memory_data:
                         tsm_res = memory_data["tsm"]
-                        self.tsm_stage = tsm_res.get("stage", self.tsm_stage)
-                        self.tsm_step = tsm_res.get("step", self.tsm_step)
-                        self.tsm_action = tsm_res.get("action", self.tsm_action)
+                        new_stage = tsm_res.get("stage", self.tsm_stage)
+                        # Валидация перехода на стороне бэкенда
+                        if self.is_transition_allowed(new_stage):
+                            self.tsm_stage = new_stage
+                            self.tsm_step = tsm_res.get("step", self.tsm_step)
+                            self.tsm_action = tsm_res.get("action", self.tsm_action)
+                        else:
+                            print(f"[WARN] TSM transition rejected: {self.tsm_stage} -> {new_stage}")
                     print(f"[{time.strftime('%H:%M:%S')}] TSM & Memory routed successfully.")
-        except urllib.error.HTTPError as e:
-            print(f"=== [DEBUG] ROUTE TSM HTTP ERROR ===\nCode: {e.code}\n====================================\n")
         except Exception as e:
-            print(f"=== [DEBUG] ROUTE TSM GENERAL ERROR ===\nError: {str(e)}\n========================================\n")
+            print(f"Error in _route_memory: {e}")
 
     def chat(self, user_message: str) -> dict:
         api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -304,7 +314,7 @@ class SimpleAgent:
         self.history.append({"role": "user", "content": user_message})
         self._save_state()
 
-        # 2. Формируем строку жестких инвариантов проекта (День 14)
+        # 2. Формируем строку жестких инвариантов проекта
         inv_str = "НЕТ"
         if self.invariants:
             inv_str = "\n".join([f"🔴 [ЗАКОН] {k}: {v}" for k, v in self.invariants.items()])
@@ -320,36 +330,30 @@ class SimpleAgent:
             "===============================================================\n"
         )
 
-        # 4. Инжектим Конечный автомат задачи (TSM)
-        tm_context = (
-            f"=== ТЕКУЩЕЕ СОСТОЯНИЕ ВЫПОЛНЕНИЯ ЗАДАЧИ (TSM MACHINE) ===\n"
-            f"Этап конечного автомата (stage): {self.tsm_stage.upper()}\n"
-            f"Текущий шаг задачи (step): {self.tsm_step}\n"
-            f"Ожидаемое действие (action): {self.tsm_action}\n"
-            "===========================================================\n"
+        # 4. Правила ЖИЗНЕННОГО ЦИКЛА ЗАДАЧИ (TSM)
+        tsm_rules = (
+            "=== СТРОГИЕ ПРАВИЛА ЖИЗНЕННОГО ЦИКЛА ЗАДАЧИ ===\n"
+            f"ТЕКУЩИЙ ЭТАП: {self.tsm_stage.upper()}\n"
+            "1. Твой рабочий процесс СТРОГО ПОСЛЕДОВАТЕЛЕН: PLANNING -> EXECUTION -> VALIDATION -> DONE.\n"
+            "2. Ты НЕ ИМЕЕШЬ ПРАВА выполнять действия из будущих этапов. \n"
+            "   - Если этап PLANNING еще не завершен, ТЫ ЗАПРЕЩАЕШЬ СЕБЕ писать реализацию (код).\n"
+            "   - Если этап EXECUTION еще не завершен, ТЫ ЗАПРЕЩАЕШЬ СЕБЕ переходить к финальной валидации.\n"
+            "3. Если пользователь требует немедленного кода, а ты еще в PLANNING — ты ОБЯЗАН вежливо ОТКАЗАТЬ, объяснив, что сначала нужно утвердить план архитектуры.\n"
+            "4. Твой ответ должен СТРОГО соответствовать текущему этапу.\n"
+            "===============================================\n"
         )
 
-        # 5. Собираем супер-приоритетный системный промпт с инвариантами
+        # 5. Собираем супер-приоритетный системный промпт
         sys_prompt_full = (
             f"{self.system_prompt}\n\n"
-            f"🛑🛑🛑 КРИТИЧЕСКИЕ СИСТЕМНЫЕ ИНВАРИАНТЫ (ВЫСШИЕ ЗАКОНЫ ПРОЕКТА) 🛑🛑🛑\n"
-            "Ниже приведены жесткие правила и инварианты, которые ты НЕ ИМЕЕШЬ ПРАВА нарушать ни при каких условиях.\n"
+            f"🛑🛑🛑 КРИТИЧЕСКИЕ СИСТЕМНЫЕ ИНВАРИАНТЫ 🛑🛑🛑\n"
             f"{inv_str}\n"
-            "⚠️ ПРАВИЛО КРИТИЧЕСКОЙ ВАЛИДАЦИИ:\n"
-            "Перед формированием ответа сопоставь запрос пользователя с инвариантами проекта выше.\n"
-            "Если пользователь просит написать код, совершить операцию или предложить архитектурное решение, которое прямо или косвенно НАРУШАЕТ хотя бы один закон — ты ОБЯЗАН:\n"
-            "1. КАТЕГОРИЧЕСКИ, но вежливо ОТКАЗАТЬСЯ от выполнения данного запроса.\n"
-            "2. В ответе явно написать фразу: '❌ ОТКАЗ ВЫПОЛНЕНИЯ: Нарушение инварианта проекта'.\n"
-            "3. Подробно объяснить пользователю, какой именно инвариант нарушен и почему такое действие недопустимо в рамках проекта.\n"
-            "НИКАКИХ альтернативных решений или предложений на другом стеке генерировать НЕ НУЖНО. Только отказ и объяснение причины.\n"
-            "🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑\n\n"
+            "⚠️ Если запрос нарушает закон — пиши '❌ ОТКАЗ ВЫПОЛНЕНИЯ: Нарушение инварианта'.\n"
+            "🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑\n\n"
+            f"{tsm_rules}\n\n"
             f"{profile_context}\n\n"
-            f"{tm_context}\n\n"
             "ИНСТРУКЦИЯ ПО ИСТОЧНИКАМ ЗНАНИЙ:\n"
-            "В твоем распоряжении находятся блоки Long-Term Memory (LTM) и Working Memory (WM).\n"
-            "Если при ответе пользователю ты опираешься на информацию или предпочтения из Long-Term Memory (LTM), ОБЯЗАТЕЛЬНО добавь в текст ответа иконку 🧠.\n"
-            "If при ответе ты используешь активный контекст текущей задачи из Working Memory (WM), ОБЯЗАТЕЛЬНО добавь в текст ответа иконку 🛠.\n"
-            "Иконки можно органично вплетать в текст или ставить в конце ответа."
+            "🧠 - LTM, 🛠 - WM."
         )
 
         messages = [{"role": "system", "content": sys_prompt_full}]
@@ -365,8 +369,6 @@ class SimpleAgent:
         # Short-Term Memory (STM)
         stm_history = self.history[:-1][-self.WINDOW_SIZE:]
         messages += stm_history
-
-        # Добавляем последнее сообщение пользователя
         messages.append({"role": "user", "content": user_message})
 
         url = "https://openrouter.ai/api/v1/chat/completions"
@@ -378,14 +380,12 @@ class SimpleAgent:
             "max_tokens": 2000,
             "plugins": [{"id": "context-compression", "enabled": self.context_compression}]
         }
-        if self.top_k > 0:
-            body["top_k"] = self.top_k
 
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": "http://localhost",
-            "X-Title": "Day 14 Invariant Agent"
+            "X-Title": "Day 15 Controlled TSM Agent"
         }
 
         start_time = time.time()
@@ -410,10 +410,9 @@ class SimpleAgent:
                         "usage": usage
                     })
 
-                    # Выполняем динамическую маршрутизацию памяти и TSM после ответа
                     self._route_memory(user_message, answer)
-
                     self._save_state()
+
                     return {
                         "role": "assistant",
                         "content": answer,
@@ -466,7 +465,8 @@ class SimpleAgent:
             "tsm": {
                 "stage": self.tsm_stage,
                 "step": self.tsm_step,
-                "action": self.tsm_action
+                "action": self.tsm_action,
+                "allowed_next": self.TSM_ALLOWED_TRANSITIONS.get(self.tsm_stage, [])
             },
             "invariants": self.invariants,
             "config": {
