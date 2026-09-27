@@ -7,3 +7,5 @@ history.json
 .env
 .idea
 .artifacts
+/scheduler_db.json
+/report.md

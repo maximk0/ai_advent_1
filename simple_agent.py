@@ -357,12 +357,22 @@ class SimpleAgent:
             )
 
         # 5. Собираем супер-приоритетный системный промпт
+        orchestration_instruction = (
+            "=== ИНСТРУКЦИЯ ПО МНОГОСЕРВЕРНОЙ ОРКЕСТРАЦИИ MCP ===\n"
+            "У тебя есть доступ к инструментам с нескольких MCP-серверов (Project Inspector, Git Manager, Scheduler, Pipeline). "
+            "Если пользователь просит выполнить комплексную задачу (например, проверить проект, запустить пайплайн, поставить напоминание и сделать git push), "
+            "ты ДОЛЖЕН по очереди вызвать все необходимые инструменты в течение диалога, пока вся цепочка действий не будет полностью выполнена. "
+            "Не останавливайся на полпути, вызывай инструменты последовательно!\n"
+            "====================================================\n"
+        )
+
         sys_prompt_full = (
             f"{self.system_prompt}\n\n"
             f"🛑🛑🛑 КРИТИЧЕСКИЕ СИСТЕМНЫЕ ИНВАРИАНТЫ 🛑🛑🛑\n"
             f"{inv_str}\n"
             "⚠️ Если запрос нарушает закон — пиши '❌ ОТКАЗ ВЫПОЛНЕНИЯ: Нарушение инварианта'.\n"
             "🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑\n\n"
+            f"{orchestration_instruction}\n\n"
             f"{tsm_rules}\n\n"
             f"{profile_context}\n\n"
             "ИНСТРУКЦИЯ ПО ИСТОЧНИКАМ ЗНАНИЙ:\n"
@@ -443,15 +453,18 @@ class SimpleAgent:
                     exec_time = round(elapsed, 2)
                     usage = resp_data.get("usage", {})
 
-                    # Если нейросеть сгенерировала нативный tool_calls
-                    tool_calls = choice_msg.get("tool_calls")
-                    if tool_calls and tool_map:
-                        print(f"[{time.strftime('%H:%M:%S')}] [Native MCP] LLM requested {len(tool_calls)} tool calls!")
+                    # Нативный цикл Tool Calling Loop (до 5 итераций)
+                    answer = ""
+                    loop_count = 0
+                    while loop_count < 5:
+                        tool_calls = choice_msg.get("tool_calls")
+                        if not tool_calls or not tool_map:
+                            answer = choice_msg.get("content", "Нет ответа.")
+                            break
 
-                        # Добавляем ответ ассистента с tool_calls в сообщения
+                        print(f"[{time.strftime('%H:%M:%S')}] [Native MCP] Turn {loop_count+1}: LLM requested {len(tool_calls)} tool calls!")
                         messages.append(choice_msg)
 
-                        # Исполняем каждый вызов функции
                         for tc in tool_calls:
                             tc_id = tc.get("id", f"call_{int(time.time())}")
                             fn_obj = tc.get("function", {})
@@ -477,20 +490,20 @@ class SimpleAgent:
                                 "content": tool_result
                             })
 
-                        # Повторный запрос в LLM API с результатами инструментов для получения финального текста
+                        # Следующий запрос в LLM API с результатами инструментов
                         body["messages"] = messages
-                        if "tools" in body:
-                            del body["tools"]
 
-                        req_step2 = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-                        with urllib.request.urlopen(req_step2, timeout=120) as res2:
-                            resp_data2 = json.loads(res2.read().decode("utf-8"))
-                            if "choices" in resp_data2 and len(resp_data2["choices"]) > 0:
-                                answer = resp_data2["choices"][0]["message"]["content"]
+                        req_next = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+                        with urllib.request.urlopen(req_next, timeout=120) as res_next:
+                            resp_next = json.loads(res_next.read().decode("utf-8"))
+                            if "choices" in resp_next and len(resp_next["choices"]) > 0:
+                                choice_msg = resp_next["choices"][0]["message"]
+                                loop_count += 1
                             else:
-                                answer = choice_msg.get("content") or "Инструменты MCP успешно выполнены."
+                                answer = "Инструменты MCP выполнены, но нет ответа от модели."
+                                break
                     else:
-                        answer = choice_msg.get("content", "Нет ответа.")
+                        answer = choice_msg.get("content", "Пайплайн оркестрации завершен.")
 
                     self.history.append({
                         "role": "assistant",
