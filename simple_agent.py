@@ -29,6 +29,7 @@ class SimpleAgent:
         self.top_p = 1.0
         self.top_k = 0
         self.context_compression = True
+        self.planning_mode_enabled = True
 
         # Трехуровневая система памяти
         self.wm = {}   # Working Memory: текущая задача, активный контекст
@@ -97,6 +98,7 @@ class SimpleAgent:
                 "top_p": self.top_p,
                 "top_k": self.top_k,
                 "context_compression": self.context_compression,
+                "planning_mode_enabled": self.planning_mode_enabled,
             },
             "stats": self.get_token_stats()
         }
@@ -141,6 +143,7 @@ class SimpleAgent:
                 self.top_p = config.get("top_p", self.top_p)
                 self.top_k = config.get("top_k", self.top_k)
                 self.context_compression = config.get("context_compression", True)
+                self.planning_mode_enabled = config.get("planning_mode_enabled", True)
             print(f"[{time.strftime('%H:%M:%S')}] State loaded from {self.STATE_FILE} ({len(self.history)} msgs)")
         except Exception as e:
             print(f"Error loading state: {e}")
@@ -152,6 +155,8 @@ class SimpleAgent:
         self.top_p = float(config.get("top_p", self.top_p))
         self.top_k = int(config.get("top_k", self.top_k))
         self.context_compression = config.get("context_compression", self.context_compression)
+        if "planning_mode_enabled" in config:
+            self.planning_mode_enabled = bool(config["planning_mode_enabled"])
         self._save_state()
 
     def clear_history(self, clear_all: bool = False):
@@ -331,17 +336,25 @@ class SimpleAgent:
         )
 
         # 4. Правила ЖИЗНЕННОГО ЦИКЛА ЗАДАЧИ (TSM)
-        tsm_rules = (
-            "=== СТРОГИЕ ПРАВИЛА ЖИЗНЕННОГО ЦИКЛА ЗАДАЧИ ===\n"
-            f"ТЕКУЩИЙ ЭТАП: {self.tsm_stage.upper()}\n"
-            "1. Твой рабочий процесс СТРОГО ПОСЛЕДОВАТЕЛЕН: PLANNING -> EXECUTION -> VALIDATION -> DONE.\n"
-            "2. Ты НЕ ИМЕЕШЬ ПРАВА выполнять действия из будущих этапов. \n"
-            "   - Если этап PLANNING еще не завершен, ТЫ ЗАПРЕЩАЕШЬ СЕБЕ писать реализацию (код).\n"
-            "   - Если этап EXECUTION еще не завершен, ТЫ ЗАПРЕЩАЕШЬ СЕБЕ переходить к финальной валидации.\n"
-            "3. Если пользователь требует немедленного кода, а ты еще в PLANNING — ты ОБЯЗАН вежливо ОТКАЗАТЬ, объяснив, что сначала нужно утвердить план архитектуры.\n"
-            "4. Твой ответ должен СТРОГО соответствовать текущему этапу.\n"
-            "===============================================\n"
-        )
+        if self.planning_mode_enabled:
+            tsm_rules = (
+                "=== СТРОГИЕ ПРАВИЛА ЖИЗНЕННОГО ЦИКЛА ЗАДАЧИ ===\n"
+                f"ТЕКУЩИЙ ЭТАП: {self.tsm_stage.upper()}\n"
+                "1. Твой рабочий процесс СТРОГО ПОСЛЕДОВАТЕЛЕН: PLANNING -> EXECUTION -> VALIDATION -> DONE.\n"
+                "2. Ты НЕ ИМЕЕШЬ ПРАВА выполнять действия из будущих этапов. \n"
+                "   - Если этап PLANNING еще не завершен, ТЫ ЗАПРЕЩАЕШЬ СЕБЕ писать реализацию (код).\n"
+                "   - Если этап EXECUTION еще не завершен, ТЫ ЗАПРЕЩАЕШЬ СЕБЕ переходить к финальной валидации.\n"
+                "3. Если пользователь требует немедленного кода, а ты еще в PLANNING — ты ОБЯЗАН вежливо ОТКАЗАТЬ, объяснив, что сначала нужно утвердить план архитектуры.\n"
+                "4. Твой ответ должен СТРОГО соответствовать текущему этапу.\n"
+                "===============================================\n"
+            )
+        else:
+            tsm_rules = (
+                "=== РЕЖИМ ПЛАНИРОВАНИЯ ОТКЛЮЧЕН ===\n"
+                "Режим строгого контроля этапов (TSM) отключен пользователем. "
+                "Ты можешь сразу генерировать код и решать задачи без обязательной последовательности этапов планирования.\n"
+                "===============================================\n"
+            )
 
         # 5. Собираем супер-приоритетный системный промпт
         sys_prompt_full = (

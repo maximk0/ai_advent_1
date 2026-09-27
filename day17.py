@@ -565,20 +565,30 @@ class Handler(BaseHTTPRequestHandler):
                     mcp_context = ""
                     lower_msg = user_msg.lower()
 
-                    if any(k in lower_msg for k in ["сдай", "сдать", "задани", "день 17", "статус git"]):
-                        # 1. Проверяем Git статус
+                    if any(k in lower_msg for k in ["сдай", "сдать", "задани", "день 17", "пуш", "запуш", "push", "коммит"]):
+                        # 1. Извлекаем имя ветки
+                        branch_name = "day17"
+                        if "ветк" in lower_msg:
+                            words = lower_msg.replace(":", " ").replace(",", " ").split()
+                            for idx, w in enumerate(words):
+                                if w in ["ветку", "ветка", "ветке"] and idx + 1 < len(words):
+                                    branch_name = words[idx + 1]
+                                elif w.startswith("day") or w.startswith("feature/"):
+                                    branch_name = w
+
+                        # 2. Выполняем проверку Git статуса
                         status_res = mcp_client.call_tool("git_status_check", {})
                         mcp_context += f"\n[MCP Tool: git_status_check] ->\n{status_res}\n"
 
-                        # 2. Формируем комментарии
-                        branch_name = "day17"
-                        if "ветк" in lower_msg:
-                            words = lower_msg.split()
-                            for w in words:
-                                if w.startswith("day") or w.startswith("feature/"):
-                                    branch_name = w
-                                    break
+                        # 3. Выполняем ТОЧЕЧНЫЙ коммит и git push на GitHub
+                        push_res = mcp_client.call_tool("git_commit_and_push", {
+                            "branch_name": branch_name,
+                            "target_files": ["day17.py", "mcp_server_git.py", "mcp_client.py", "simple_agent.py", "assignments_state.json", "README.md"],
+                            "commit_message": f"AI Advent Day 17 submission for branch {branch_name}"
+                        })
+                        mcp_context += f"\n[MCP Tool: git_commit_and_push] ->\n{push_res}\n"
 
+                        # 4. Формируем комментарии для Google Таблицы
                         comments_res = mcp_client.call_tool("format_submission_comments", {
                             "day_number": "17",
                             "branch_name": branch_name,

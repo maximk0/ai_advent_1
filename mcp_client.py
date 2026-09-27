@@ -67,6 +67,13 @@ class MCPClient:
 
     def start(self):
         """Запускает процесс MCP сервера и инициализирует сессию."""
+        if self.process and self.process.poll() is None:
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=1)
+            except Exception:
+                pass
+
         try:
             self.process = subprocess.Popen(
                 [sys.executable, self.server_script_path],
@@ -90,14 +97,22 @@ class MCPClient:
                 self.refresh_tools()
             else:
                 self.is_connected = False
+                err_out = ""
+                if self.process and self.process.poll() is not None and self.process.stderr:
+                    err_out = self.process.stderr.read().decode("utf-8", errors="ignore")
+                print(f"[MCPClient] Failed to initialize server. Response: {init_resp}. Stderr: {err_out}")
         except Exception as e:
             print(f"[MCPClient] Error starting server: {e}")
             self.is_connected = False
 
     def refresh_tools(self) -> List[Dict[str, Any]]:
         """Запрашивает актуальный список инструментов MCP сервера."""
+        if not self.is_connected or not self.process or self.process.poll() is not None:
+            self.start()
+
         if not self.is_connected:
             return []
+
         resp = self._send_request("tools/list")
         if resp and "result" in resp and "tools" in resp["result"]:
             self.tools = resp["result"]["tools"]
@@ -105,6 +120,9 @@ class MCPClient:
 
     def call_tool(self, tool_name: str, arguments: Dict[str, Any] = None) -> str:
         """Вызывает инструмент MCP сервера и возвращает результат."""
+        if not self.is_connected or not self.process or self.process.poll() is not None:
+            self.start()
+
         if not self.is_connected:
             return "Ошибка: MCP сервер не подключен."
 
