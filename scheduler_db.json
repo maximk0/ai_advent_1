@@ -1,0 +1,36 @@
+{
+  "reminders": [
+    {
+      "id": "rem_1",
+      "text": "Записать демо-видео 18-го дня по планировщику MCP",
+      "target_time": "2026-09-27 23:35:00",
+      "created_at": "2026-09-27 23:25:00",
+      "triggered": false
+    }
+  ],
+  "periodic_jobs": [
+    {
+      "id": "job_1",
+      "name": "Мониторинг Git статуса и токенов",
+      "metric_type": "system_stats",
+      "interval_seconds": 30,
+      "last_run": "2026-09-27 23:28:00",
+      "run_count": 5
+    }
+  ],
+  "collected_metrics": [
+    {
+      "timestamp": "2026-09-27 23:28:00",
+      "metric_type": "system_stats",
+      "data": {
+        "git_branch": "day17",
+        "uncommitted_files": 2,
+        "active_mcp_servers": ["git-server", "scheduler-server"],
+        "status": "normal"
+      }
+    }
+  ],
+  "logs": [
+    "2026-09-27 23:25:00 [SYSTEM] Background Scheduler Daemon started 24/7."
+  ]
+}

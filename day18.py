@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""День 17: Первый инструмент MCP (Точечный Git Push & Комментарии с кнопкой скопировать)
-   Интеграция точечного Git MCP сервера, сохранение 100% сайдбара и диалога с нейросетью.
+"""День 18: Планировщик и фоновые задачи 24/7 (MCP Scheduler & Aggregated Summary)
+   Полная интеграция фонового MCP-планировщика, сохранение 100% сайдбара прошлых дней
+   (Законы 🔒, TSM 🛤, Профили 🎭, Память LTM/WM 🧠, Git MCP 🐙).
 """
 
 from __future__ import annotations
@@ -17,16 +18,17 @@ from chat_ui import get_chat_page
 from mcp_client import MCPClient
 
 ROOT = Path(__file__).resolve().parent
-PORT = 8017
+PORT = 8018
 _LOCK = threading.Lock()
 
 # Инициализируем Агента
 agent = SimpleAgent()
 
-# Инициализируем MCP клиент для общения с mcp_server_git.py
-mcp_client = MCPClient(ROOT / "mcp_server_git.py")
+# Инициализируем MCP клиенты (Планировщик + Git)
+scheduler_client = MCPClient(ROOT / "mcp_server_scheduler.py")
+git_client = MCPClient(ROOT / "mcp_server_git.py")
 
-# Полный HTML сайдбара: День 15 + День 16 + День 17 (Git MCP)
+# Полный HTML сайдбара: Дни 15–17 + День 18 (24/7 Scheduler & Summary)
 SIDEBAR_STATS_HTML = """
 <!-- 1. ИНВАРИАНТЫ (Законы) -->
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
@@ -123,54 +125,38 @@ SIDEBAR_STATS_HTML = """
   </div>
 </div>
 
-<!-- 6. ДЕНЬ 17: GIT MCP ASSIGNMENT & COPY COMMENTS -->
+<!-- 6. GIT MCP ASSIGNMENT (День 17) -->
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
-  <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem; color: #38bdf8;">🐙 Git MCP Assignment (Точечный Пуш & Скопировать):</label>
-  <div style="background: rgba(56, 189, 248, 0.05); padding: 8px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.2); font-size: 0.75rem; margin-bottom: 8px; display: flex; flex-direction: column; gap: 4px;">
-    <div><b style="color: var(--accent);">Статус Git MCP:</b> <span id="mcpStatus" style="color: #4ade80;">...</span></div>
-    <div><b style="color: var(--accent);">Сервер:</b> <span id="mcpServerName" style="color: var(--text-main);">...</span></div>
+  <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem; color: #38bdf8;">🐙 Git MCP Assignment:</label>
+  <div style="display: flex; gap: 4px;">
+    <button onclick="runGitStatusCheck()" style="flex:1; padding: 4px; font-size: 0.65rem; background: var(--border); border: none; border-radius: 4px; color: white; cursor: pointer;">🔍 Git Статус</button>
+    <button onclick="runGitPush()" style="flex:1; padding: 4px; font-size: 0.65rem; background: #38bdf8; border: none; border-radius: 4px; color: #000; font-weight: bold; cursor: pointer;">🚀 Git Push (day18)</button>
+  </div>
+</div>
+
+<!-- 7. ДЕНЬ 18: 24/7 SCHEDULER & BACKGROUND JOBS MCP -->
+<div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
+  <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem; color: #f59e0b;">⏰ 24/7 MCP Scheduler & Summary (День 18):</label>
+  <div style="background: rgba(245, 158, 11, 0.05); padding: 8px; border-radius: 6px; border: 1px solid rgba(245, 158, 11, 0.2); font-size: 0.75rem; margin-bottom: 8px; display: flex; flex-direction: column; gap: 4px;">
+    <div><b style="color: var(--accent);">Статус Демона:</b> <span id="schStatus" style="color: #4ade80;">🟢 Активен (24/7)</span></div>
+    <div><b style="color: var(--accent);">Сервер:</b> <span id="schServerName" style="color: var(--text-main);">scheduler-247-server v1.0.0</span></div>
   </div>
 
   <div style="background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; border: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px;">
-    <span style="font-size: 0.7rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Параметры сдачи:</span>
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">
-      <input type="text" id="gitDayNum" value="17" placeholder="День (17)" class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto;">
-      <input type="text" id="gitBranch" value="day17" placeholder="Ветка (day17)" class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto;">
-    </div>
-    <input type="text" id="gitTargetFiles" value="day17.py, mcp_server_git.py, README.md" placeholder="Файлы (day17.py, mcp_server_git.py)" class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto;">
-    <input type="text" id="gitVideoLink" value="https://youtu.be/day17_git_mcp" placeholder="Ссылка на видео" class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto;">
-    <textarea id="gitLearnedInfo" placeholder="Новые концепции для README..." class="input-field" style="font-size: 0.7rem; padding: 4px; min-height: 40px; height: 40px; resize: vertical;">Первый инструмент MCP, точечный Git commit & push выбранных файлов, автогенерация README.md для веток и кнопки быстрой вставки комментариев в Google Таблицу.</textarea>
-
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 4px;">
-      <button onclick="runGitStatusCheck()" style="padding: 4px; font-size: 0.65rem; background: var(--border); border: none; border-radius: 4px; color: white; cursor: pointer;">🔍 Статус Git</button>
-      <button onclick="runCreateReadme()" style="padding: 4px; font-size: 0.65rem; background: #4ade80; border: none; border-radius: 4px; color: #000; font-weight: bold; cursor: pointer;">📝 Создать README</button>
-      <button onclick="runGitPush()" style="padding: 4px; font-size: 0.65rem; background: #38bdf8; border: none; border-radius: 4px; color: #000; font-weight: bold; cursor: pointer; grid-column: span 2;">🚀 Точечный Git Push выбранных файлов</button>
-      <button onclick="runFormatComments()" style="padding: 4px; font-size: 0.65rem; background: #a855f7; border: none; border-radius: 4px; color: white; font-weight: bold; cursor: pointer; grid-column: span 2;">📋 Сформировать комментарии для Таблицы</button>
+    <span style="font-size: 0.7rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Создать отложенное напоминание:</span>
+    <input type="text" id="remText" placeholder="Текст напоминания..." value="Записать видео 18-го дня" class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto;">
+    <div style="display: flex; gap: 4px;">
+      <input type="number" id="remDelay" value="15" placeholder="Секунд (15)" class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto; flex: 1;">
+      <button onclick="runAddReminder()" style="padding: 4px 8px; font-size: 0.65rem; background: #f59e0b; border: none; border-radius: 4px; color: #000; font-weight: bold; cursor: pointer;">⏰ Поставить</button>
     </div>
   </div>
 
-  <!-- БЛОК С ГОТОВЫМИ КОММЕНТАРИЯМИ И КНОПКАМИ СКОПИРОВАТЬ -->
-  <div id="commentsOutputBlock" style="display: none; background: rgba(168, 85, 247, 0.1); border: 1px solid var(--accent); padding: 8px; border-radius: 6px; margin-bottom: 8px; flex-direction: column; gap: 8px;">
-    <span style="font-size: 0.7rem; font-weight: bold; color: var(--accent);">Готовые комментарии для Google Таблицы:</span>
-
-    <div style="display: flex; flex-direction: column; gap: 2px;">
-      <span style="font-size: 0.65rem; color: var(--text-dim);">1. Комментарий с кодом:</span>
-      <div style="display: flex; gap: 4px;">
-        <input type="text" id="codeCommentTxt" readonly class="input-field" style="font-size: 0.65rem; padding: 2px 4px; flex: 1; height: auto; background: #000; color: #4ade80; font-family: monospace;">
-        <button onclick="copyToClipboard('codeCommentTxt', 'btnCopyCode')" id="btnCopyCode" style="padding: 2px 6px; font-size: 0.65rem; background: var(--primary); border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: bold;">📋 Скопировать</button>
-      </div>
-    </div>
-
-    <div style="display: flex; flex-direction: column; gap: 2px;">
-      <span style="font-size: 0.65rem; color: var(--text-dim);">2. Комментарий с видео:</span>
-      <div style="display: flex; gap: 4px;">
-        <input type="text" id="videoCommentTxt" readonly class="input-field" style="font-size: 0.65rem; padding: 2px 4px; flex: 1; height: auto; background: #000; color: #a855f7; font-family: monospace;">
-        <button onclick="copyToClipboard('videoCommentTxt', 'btnCopyVideo')" id="btnCopyVideo" style="padding: 2px 6px; font-size: 0.65rem; background: var(--primary); border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: bold;">📋 Скопировать</button>
-      </div>
-    </div>
+  <div style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px;">
+    <button onclick="runGetSummary()" style="width:100%; padding: 6px; font-size: 0.75rem; background: linear-gradient(135deg, #a855f7, #6366f1); border: none; border-radius: 6px; color: white; font-weight: bold; cursor: pointer; box-shadow: 0 0 10px rgba(168,85,247,0.3);">📊 Сформировать 24/7 Сводку (Summary)</button>
+    <button onclick="runListJobs()" style="width:100%; padding: 4px; font-size: 0.65rem; background: var(--border); border: none; border-radius: 4px; color: white; cursor: pointer;">🔍 Активные задачи и логи</button>
   </div>
 
-  <div id="mcpConsole" style="display: none; background: #000; padding: 6px; border-radius: 6px; font-family: monospace; font-size: 0.65rem; max-height: 120px; overflow-y: auto; color: #38bdf8; white-space: pre-wrap; border: 1px solid var(--border); line-height: 1.3;"></div>
+  <div id="schConsole" style="display: none; background: #000; padding: 6px; border-radius: 6px; font-family: monospace; font-size: 0.65rem; max-height: 120px; overflow-y: auto; color: #f59e0b; white-space: pre-wrap; border: 1px solid var(--border); line-height: 1.3;"></div>
 </div>
 
 <!-- TOKEN STATS -->
@@ -281,12 +267,11 @@ async function refreshUI() {
         renderMap('ltmList', state.ltm, "Нет долговременных фактов");
         renderMap('wmList', state.wm, "Нет активных данных задачи");
 
-        // 5. ДЕНЬ 17: Git MCP Tools
-        if (state.mcp) {
-            document.getElementById('mcpStatus').textContent = state.mcp.is_connected ? '🟢 Активен (stdio)' : '🔴 Отключен';
-            document.getElementById('mcpStatus').style.color = state.mcp.is_connected ? '#4ade80' : '#f87171';
-            const sInfo = state.mcp.server_info || {};
-            document.getElementById('mcpServerName').textContent = `${sInfo.name || 'git-server'} v${sInfo.version || '1.0.0'}`;
+        // 5. ДЕНЬ 18: Scheduler Status
+        if (state.scheduler_mcp) {
+            const isConn = state.scheduler_mcp.is_connected;
+            document.getElementById('schStatus').textContent = isConn ? '🟢 Активен (24/7)' : '🔴 Отключен';
+            document.getElementById('schStatus').style.color = isConn ? '#4ade80' : '#f87171';
         }
 
         // Чат
@@ -297,7 +282,7 @@ async function refreshUI() {
                 addMessage(isBot ? 'bot' : 'user', m.content, isBot ? {model: m.model, time: m.time, usage: m.usage} : null);
             });
         } else {
-            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! Я агент с **Точечным Git MCP Сервером**. Попроси меня «Сдай задание» — я проверю статус Git, помогу выбрать ветку и файлы, сделаю push на GitHub и дам готовые комментарии с кнопками скопировать! 🐙🚀</div></div>';
+            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! Я агент с **24/7 Фоновым MCP Планировщиком**. Попроси меня «Напомни записать видео через 20 секунд» или «Сформируй суточный summary»! ⏰📊</div></div>';
         }
 
         if (state.stats) {
@@ -307,97 +292,54 @@ async function refreshUI() {
     } catch (e) { console.error(e); }
 }
 
-async function callMcpTool(toolName, args = {}) {
-    const consoleEl = document.getElementById('mcpConsole');
+async function callSchedulerTool(toolName, args = {}) {
+    const consoleEl = document.getElementById('schConsole');
     consoleEl.style.display = 'block';
-    consoleEl.textContent = `⏳ Выполнение Git MCP инструмента ${toolName}...`;
+    consoleEl.textContent = `⏳ Выполнение MCP планировщика ${toolName}...`;
     try {
-        const res = await fetch('/api/mcp/call', {
+        const res = await fetch('/api/mcp/scheduler/call', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({tool: toolName, args: args})
         });
         const data = await res.json();
         consoleEl.textContent = `> ${toolName}(${JSON.stringify(args)})\n` + (data.result || data.error || 'Нет ответа');
-
-        if (toolName === 'format_submission_comments' && data.result) {
-            try {
-                const parsed = JSON.parse(data.result);
-                if (parsed.code_comment && parsed.video_comment) {
-                    document.getElementById('commentsOutputBlock').style.display = 'flex';
-                    document.getElementById('codeCommentTxt').value = parsed.code_comment;
-                    document.getElementById('videoCommentTxt').value = parsed.video_comment;
-                }
-            } catch(e) {}
-        }
-
     } catch(e) {
         consoleEl.textContent = `❌ Ошибка: ${e.message}`;
     }
 }
 
-function runGitStatusCheck() {
-    callMcpTool('git_status_check', {});
+function runAddReminder() {
+    const txt = document.getElementById('remText').value || 'Напоминание';
+    const delay = parseInt(document.getElementById('remDelay').value) || 15;
+    callSchedulerTool('add_reminder', {text: txt, delay_seconds: delay});
 }
 
-function runCreateReadme() {
-    const day = document.getElementById('gitDayNum').value || '17';
-    const branch = document.getElementById('gitBranch').value || 'day17';
-    const info = document.getElementById('gitLearnedInfo').value || '';
-    const video = document.getElementById('gitVideoLink').value || '';
-    const code = `https://github.com/user/ai_advent_1/blob/${branch}/day${day}.py`;
-
-    callMcpTool('create_branch_readme', {
-        day_number: day,
-        topic: "Первый инструмент MCP",
-        learned_info: info,
-        branch_name: branch,
-        code_link: code,
-        video_link: video
-    });
+function runGetSummary() {
+    callSchedulerTool('get_aggregated_summary', {});
 }
 
+function runListJobs() {
+    callSchedulerTool('list_active_jobs', {});
+}
+
+async function callGitMcpTool(toolName, args = {}) {
+    try {
+        const res = await fetch('/api/mcp/git/call', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tool: toolName, args: args})
+        });
+        const data = await res.json();
+        alert(data.result || data.error || 'Готово');
+    } catch(e) { alert("Ошибка: " + e.message); }
+}
+
+function runGitStatusCheck() { callGitMcpTool('git_status_check', {}); }
 function runGitPush() {
-    const branch = document.getElementById('gitBranch').value || 'day17';
-    const rawFiles = document.getElementById('gitTargetFiles').value || 'day17.py, mcp_server_git.py, README.md';
-    const targetFilesList = rawFiles.split(',').map(s => s.trim()).filter(Boolean);
-
-    callMcpTool('git_commit_and_push', {
-        branch_name: branch,
-        target_files: targetFilesList,
-        commit_message: `AI Advent submission for branch ${branch}`
-    });
-}
-
-function runFormatComments() {
-    const day = document.getElementById('gitDayNum').value || '17';
-    const branch = document.getElementById('gitBranch').value || 'day17';
-    const video = document.getElementById('gitVideoLink').value || '';
-    const code = `https://github.com/user/ai_advent_1/blob/${branch}/day${day}.py`;
-
-    callMcpTool('format_submission_comments', {
-        day_number: day,
-        branch_name: branch,
-        code_link: code,
-        video_link: video
-    });
-}
-
-function copyToClipboard(inputId, btnId) {
-    const inputEl = document.getElementById(inputId);
-    inputEl.select();
-    inputEl.setSelectionRange(0, 99999);
-    navigator.clipboard.writeText(inputEl.value).then(() => {
-        const btn = document.getElementById(btnId);
-        const origText = btn.textContent;
-        btn.textContent = '✅ Скопировано!';
-        btn.style.background = '#4ade80';
-        btn.style.color = '#000';
-        setTimeout(() => {
-            btn.textContent = origText;
-            btn.style.background = 'var(--primary)';
-            btn.style.color = 'white';
-        }, 2000);
+    callGitMcpTool('git_commit_and_push', {
+        branch_name: 'day18',
+        target_files: ['day18.py', 'mcp_server_scheduler.py', 'scheduler_db.json', 'README.md']
     });
 }
 
@@ -515,7 +457,7 @@ addMessage = function(role, content, meta) {
         let ind = "";
         if (content.includes("🧠")) ind += `<span style="background:rgba(168,85,247,0.2); border:1px solid var(--accent); padding:2px 6px; border-radius:4px; font-size:0.75rem; margin-right:5px;">🧠 LTM</span>`;
         if (content.includes("🛠")) ind += `<span style="background:rgba(59,130,246,0.2); border:1px solid #3b82f6; padding:2px 6px; border-radius:4px; font-size:0.75rem; margin-right:5px;">🛠 WM</span>`;
-        if (content.includes("🐙") || content.includes("Git") || content.includes("код (ветка")) ind += `<span style="background:rgba(56,189,248,0.2); border:1px solid #38bdf8; padding:2px 6px; border-radius:4px; font-size:0.75rem;">🐙 Git MCP</span>`;
+        if (content.includes("⏰") || content.includes("Summary") || content.includes("Планировщик")) ind += `<span style="background:rgba(245,158,11,0.2); border:1px solid #f59e0b; padding:2px 6px; border-radius:4px; font-size:0.75rem;">⏰ 24/7 Scheduler</span>`;
         if (ind) {
             const m = res.querySelector('.msg-meta');
             if (m) { const c = document.createElement('div'); c.style="margin-top:5px; display:flex; gap:5px;"; c.innerHTML=ind; res.insertBefore(c, m); }
@@ -533,10 +475,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             with _LOCK:
                 state = agent.get_state()
-                tools_list = mcp_client.refresh_tools()
-                state["mcp"] = {
-                    "is_connected": mcp_client.is_connected,
-                    "server_info": mcp_client.server_info,
+                tools_list = scheduler_client.refresh_tools()
+                state["scheduler_mcp"] = {
+                    "is_connected": scheduler_client.is_connected,
+                    "server_info": scheduler_client.server_info,
                     "tools": tools_list
                 }
                 self._send_json(state)
@@ -544,7 +486,7 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        page_html = get_chat_page(title="Git MCP Assignment Agent — День 17", extra_sidebar_html=SIDEBAR_STATS_HTML, extra_scripts=EXTRA_SCRIPTS)
+        page_html = get_chat_page(title="24/7 MCP Scheduler Agent — День 18", extra_sidebar_html=SIDEBAR_STATS_HTML, extra_scripts=EXTRA_SCRIPTS)
         body = page_html.encode("utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -561,71 +503,62 @@ class Handler(BaseHTTPRequestHandler):
                 with _LOCK:
                     agent.set_config(data.get("config", {}))
 
-                    # Автоматический диалоговый сценарий сдачи задания через Git MCP
                     mcp_context = ""
                     lower_msg = user_msg.lower()
 
-                    if any(k in lower_msg for k in ["сдай", "сдать", "задани", "день 17", "пуш", "запуш", "push", "коммит", "редми", "readme"]):
-                        # 1. Извлекаем имя ветки
-                        branch_name = "day17"
-                        if "ветк" in lower_msg:
-                            words = lower_msg.replace(":", " ").replace(",", " ").split()
-                            for idx, w in enumerate(words):
-                                if w in ["ветку", "ветка", "ветке"] and idx + 1 < len(words):
-                                    branch_name = words[idx + 1]
-                                elif w.startswith("day") or w.startswith("feature/"):
-                                    branch_name = w
-
-                        # 2. Выполняем проверку Git статуса
-                        status_res = mcp_client.call_tool("git_status_check", {})
-                        mcp_context += f"\n[MCP Tool: git_status_check] ->\n{status_res}\n"
-
-                        # 3. Автоматически создаем/обновляем README.md перед пушем
-                        readme_res = mcp_client.call_tool("create_branch_readme", {
-                            "day_number": "17",
-                            "topic": "Первый инструмент MCP",
-                            "learned_info": "Создание точечного Git MCP сервера, работа с ветками, автоматическое создание README.md и форматирование комментариев сдачи.",
-                            "branch_name": branch_name
+                    # 1. Постановка напоминаний
+                    if any(k in lower_msg for k in ["напомни", "напоминани", "через"]):
+                        delay = 20
+                        words = lower_msg.split()
+                        for idx, w in enumerate(words):
+                            if w in ["через", "спустя"] and idx + 1 < len(words):
+                                try:
+                                    delay = int(words[idx + 1])
+                                except ValueError:
+                                    pass
+                        rem_res = scheduler_client.call_tool("add_reminder", {
+                            "text": user_msg,
+                            "delay_seconds": delay
                         })
-                        mcp_context += f"\n[MCP Tool: create_branch_readme] ->\n{readme_res}\n"
+                        mcp_context += f"\n[MCP Tool: add_reminder] ->\n{rem_res}\n"
 
-                        # 4. Выполняем ТОЧЕЧНЫЙ коммит и git push на GitHub
-                        push_res = mcp_client.call_tool("git_commit_and_push", {
-                            "branch_name": branch_name,
-                            "target_files": ["day17.py", "mcp_server_git.py", "mcp_client.py", "simple_agent.py", "assignments_state.json", "README.md"],
-                            "commit_message": f"AI Advent Day 17 submission for branch {branch_name}"
-                        })
-                        mcp_context += f"\n[MCP Tool: git_commit_and_push] ->\n{push_res}\n"
+                    # 2. Запрос суточной 24/7 сводки
+                    if any(k in lower_msg for k in ["сводк", "summary", "отчет", "агрегир", "24/7"]):
+                        sum_res = scheduler_client.call_tool("get_aggregated_summary", {})
+                        mcp_context += f"\n[MCP Tool: get_aggregated_summary] ->\n{sum_res}\n"
 
-                        # 5. Формируем комментарии для Google Таблицы
-                        comments_res = mcp_client.call_tool("format_submission_comments", {
-                            "day_number": "17",
-                            "branch_name": branch_name,
-                            "code_link": f"https://github.com/user/ai_advent_1/blob/{branch_name}/day17.py",
-                            "video_link": "https://youtu.be/day17_mcp_demo"
-                        })
-                        mcp_context += f"\n[MCP Tool: format_submission_comments] ->\n{comments_res}\n"
+                    # 3. Список фоновых задач
+                    if any(k in lower_msg for k in ["задач", "логи", "поток", "список задач"]):
+                        jobs_res = scheduler_client.call_tool("list_active_jobs", {})
+                        mcp_context += f"\n[MCP Tool: list_active_jobs] ->\n{jobs_res}\n"
 
                     if mcp_context:
-                        augmented_msg = f"{user_msg}\n\n=== КОНТЕКСТ ИЗ GIT MCP СЕРВЕРА ==={mcp_context}"
+                        augmented_msg = f"{user_msg}\n\n=== КОНТЕКСТ ИЗ 24/7 MCP ПЛАНИРОВЩИКА ==={mcp_context}"
                         result = agent.chat(augmented_msg)
                     else:
                         result = agent.chat(user_msg)
 
                 self._send_json(result)
 
+            elif path == "/api/mcp/scheduler/call":
+                data = json.loads(raw_body)
+                tool_name = data.get("tool", "")
+                args = data.get("args", {})
+                res = scheduler_client.call_tool(tool_name, args)
+                self._send_json({"result": res})
+
+            elif path == "/api/mcp/git/call":
+                data = json.loads(raw_body)
+                tool_name = data.get("tool", "")
+                args = data.get("args", {})
+                res = git_client.call_tool(tool_name, args)
+                self._send_json({"result": res})
+
             elif path == "/api/config":
                 data = json.loads(raw_body)
                 with _LOCK:
                     agent.set_config(data)
                 self._send_json({"status": "config_updated"})
-
-            elif path == "/api/mcp/call":
-                data = json.loads(raw_body)
-                tool_name = data.get("tool", "")
-                args = data.get("args", {})
-                res = mcp_client.call_tool(tool_name, args)
-                self._send_json({"result": res})
 
             elif path == "/api/clear":
                 data = json.loads(raw_body)
@@ -695,9 +628,10 @@ def load_env() -> None:
 
 if __name__ == "__main__":
     load_env()
-    print(f"🚀 День 17 Git MCP Agent & Sidebar: http://127.0.0.1:{PORT}")
+    print(f"🚀 День 18 24/7 Scheduler MCP Agent & Sidebar: http://127.0.0.1:{PORT}")
     try:
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
     except KeyboardInterrupt:
-        mcp_client.close()
+        scheduler_client.close()
+        git_client.close()
         sys.exit(0)
