@@ -310,7 +310,7 @@ class SimpleAgent:
         except Exception as e:
             print(f"Error in _route_memory: {e}")
 
-    def chat(self, user_message: str) -> dict:
+    def chat(self, user_message: str, mcp_clients: list = None) -> dict:
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
             return {"error": "Нет OPENROUTER_API_KEY в .env"}
@@ -384,6 +384,30 @@ class SimpleAgent:
         messages += stm_history
         messages.append({"role": "user", "content": user_message})
 
+        # 6. Нативная конвертация инструментов MCP в формат OpenAI / OpenRouter tools
+        openai_tools = []
+        tool_map = {}
+
+        if mcp_clients:
+            for client in mcp_clients:
+                if client:
+                    try:
+                        tools_list = client.refresh_tools()
+                        for t in tools_list:
+                            t_name = t.get("name")
+                            if t_name:
+                                tool_map[t_name] = client
+                                openai_tools.append({
+                                    "type": "function",
+                                    "function": {
+                                        "name": t_name,
+                                        "description": t.get("description", ""),
+                                        "parameters": t.get("inputSchema", {"type": "object", "properties": {}})
+                                    }
+                                })
+                    except Exception as e:
+                        print(f"[Native MCP] Error loading tools from client: {e}")
+
         url = "https://openrouter.ai/api/v1/chat/completions"
         body = {
             "model": self.model,
@@ -394,11 +418,15 @@ class SimpleAgent:
             "plugins": [{"id": "context-compression", "enabled": self.context_compression}]
         }
 
+        if openai_tools:
+            body["tools"] = openai_tools
+            body["tool_choice"] = "auto"
+
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": "http://localhost",
-            "X-Title": "Day 15 Controlled TSM Agent"
+            "X-Title": "Native MCP Agent"
         }
 
         start_time = time.time()
@@ -410,10 +438,59 @@ class SimpleAgent:
                 resp_data = json.loads(raw_response)
 
                 if "choices" in resp_data and len(resp_data["choices"]) > 0:
-                    answer = resp_data["choices"][0]["message"]["content"]
+                    choice_msg = resp_data["choices"][0]["message"]
                     model_used = resp_data.get("model", self.model)
                     exec_time = round(elapsed, 2)
                     usage = resp_data.get("usage", {})
+
+                    # Если нейросеть сгенерировала нативный tool_calls
+                    tool_calls = choice_msg.get("tool_calls")
+                    if tool_calls and tool_map:
+                        print(f"[{time.strftime('%H:%M:%S')}] [Native MCP] LLM requested {len(tool_calls)} tool calls!")
+
+                        # Добавляем ответ ассистента с tool_calls в сообщения
+                        messages.append(choice_msg)
+
+                        # Исполняем каждый вызов функции
+                        for tc in tool_calls:
+                            tc_id = tc.get("id", f"call_{int(time.time())}")
+                            fn_obj = tc.get("function", {})
+                            fn_name = fn_obj.get("name")
+                            fn_args_raw = fn_obj.get("arguments", "{}")
+
+                            try:
+                                fn_args = json.loads(fn_args_raw) if isinstance(fn_args_raw, str) else fn_args_raw
+                            except Exception:
+                                fn_args = {}
+
+                            client = tool_map.get(fn_name)
+                            if client:
+                                tool_result = client.call_tool(fn_name, fn_args)
+                            else:
+                                tool_result = f"Error: MCP Server for tool '{fn_name}' not found."
+
+                            print(f"[Native MCP] Executed {fn_name}({fn_args}) -> {tool_result[:100]}...")
+
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc_id,
+                                "content": tool_result
+                            })
+
+                        # Повторный запрос в LLM API с результатами инструментов для получения финального текста
+                        body["messages"] = messages
+                        if "tools" in body:
+                            del body["tools"]
+
+                        req_step2 = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+                        with urllib.request.urlopen(req_step2, timeout=120) as res2:
+                            resp_data2 = json.loads(res2.read().decode("utf-8"))
+                            if "choices" in resp_data2 and len(resp_data2["choices"]) > 0:
+                                answer = resp_data2["choices"][0]["message"]["content"]
+                            else:
+                                answer = choice_msg.get("content") or "Инструменты MCP успешно выполнены."
+                    else:
+                        answer = choice_msg.get("content", "Нет ответа.")
 
                     self.history.append({
                         "role": "assistant",

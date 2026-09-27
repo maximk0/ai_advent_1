@@ -87,6 +87,7 @@ def _bg_scheduler_loop():
                             if now_dt >= target_dt:
                                 rem["triggered"] = True
                                 rem["triggered_at"] = now_str
+                                rem["popup_shown"] = False
                                 log_msg = f"{now_str} [⏰ НАПОМИНАНИЕ СРАБОТАЛО]: {rem.get('text')}"
                                 db.setdefault("logs", []).append(log_msg)
                                 changed = True
@@ -266,6 +267,26 @@ def get_aggregated_summary() -> str:
         "active_jobs_count": len(jobs)
     }, ensure_ascii=False, indent=2)
 
+def get_unshown_popups() -> str:
+    """Возвращает сработавшие напоминания, которые еще не были показаны всплывающим окном в UI."""
+    with _DB_LOCK:
+        db = _load_db()
+        unshown = []
+        changed = False
+        for rem in db.get("reminders", []):
+            if rem.get("triggered") and not rem.get("popup_shown"):
+                unshown.append(rem)
+                rem["popup_shown"] = True
+                changed = True
+        if changed:
+            _save_db(db)
+
+    return json.dumps({
+        "status": "success",
+        "unshown_count": len(unshown),
+        "popups": unshown
+    }, ensure_ascii=False, indent=2)
+
 def trigger_job_now(job_name: str) -> str:
     """Принудительно выполняет фоновый сбор данных прямо сейчас."""
     target_name = job_name.strip()
@@ -345,6 +366,14 @@ TOOLS = [
             },
             "required": ["job_name"]
         }
+    },
+    {
+        "name": "get_unshown_popups",
+        "description": "Возвращает не показанные сработавшие всплывающие напоминания.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
     }
 ]
 
@@ -415,6 +444,8 @@ def handle_json_rpc(request_str: str):
             result_text = trigger_job_now(
                 arguments.get("job_name", "Ручной запуск")
             )
+        elif tool_name == "get_unshown_popups":
+            result_text = get_unshown_popups()
         else:
             result_text = f"Неизвестный инструмент: {tool_name}"
 

@@ -292,6 +292,41 @@ async function refreshUI() {
     } catch (e) { console.error(e); }
 }
 
+async function checkPopups() {
+    try {
+        const res = await fetch('/api/mcp/scheduler/call', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tool: 'get_unshown_popups', args: {}})
+        });
+        const data = await res.json();
+        if (data.result) {
+            const parsed = JSON.parse(data.result);
+            if (parsed.popups && parsed.popups.length > 0) {
+                parsed.popups.forEach(p => {
+                    showToastNotification(`⏰ ${p.text} (${p.target_time})`);
+                });
+                refreshUI();
+            }
+        }
+    } catch(e) {}
+}
+
+function showToastNotification(text) {
+    let toast = document.getElementById('toastNotification');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'toastNotification';
+        toast.style = 'position:fixed; top:20px; right:20px; z-index:9999; background:#f59e0b; color:#000; padding:12px 18px; border-radius:10px; font-weight:bold; font-size:0.85rem; box-shadow:0 4px 15px rgba(245,158,11,0.5); border:2px solid #fff; max-width:320px;';
+        document.body.appendChild(toast);
+    }
+    toast.innerHTML = `🔔 <b>СРАБОТАЛО НАПОМИНАНИЕ 24/7:</b><br>${text}`;
+    toast.style.display = 'block';
+    setTimeout(() => { if (toast) toast.style.display = 'none'; }, 8000);
+}
+
+setInterval(checkPopups, 3000);
+
 async function callSchedulerTool(toolName, args = {}) {
     const consoleEl = document.getElementById('schConsole');
     consoleEl.style.display = 'block';
@@ -502,41 +537,7 @@ class Handler(BaseHTTPRequestHandler):
                 user_msg = data.get("message", "")
                 with _LOCK:
                     agent.set_config(data.get("config", {}))
-
-                    mcp_context = ""
-                    lower_msg = user_msg.lower()
-
-                    # 1. Постановка напоминаний
-                    if any(k in lower_msg for k in ["напомни", "напоминани", "через"]):
-                        delay = 20
-                        words = lower_msg.split()
-                        for idx, w in enumerate(words):
-                            if w in ["через", "спустя"] and idx + 1 < len(words):
-                                try:
-                                    delay = int(words[idx + 1])
-                                except ValueError:
-                                    pass
-                        rem_res = scheduler_client.call_tool("add_reminder", {
-                            "text": user_msg,
-                            "delay_seconds": delay
-                        })
-                        mcp_context += f"\n[MCP Tool: add_reminder] ->\n{rem_res}\n"
-
-                    # 2. Запрос суточной 24/7 сводки
-                    if any(k in lower_msg for k in ["сводк", "summary", "отчет", "агрегир", "24/7"]):
-                        sum_res = scheduler_client.call_tool("get_aggregated_summary", {})
-                        mcp_context += f"\n[MCP Tool: get_aggregated_summary] ->\n{sum_res}\n"
-
-                    # 3. Список фоновых задач
-                    if any(k in lower_msg for k in ["задач", "логи", "поток", "список задач"]):
-                        jobs_res = scheduler_client.call_tool("list_active_jobs", {})
-                        mcp_context += f"\n[MCP Tool: list_active_jobs] ->\n{jobs_res}\n"
-
-                    if mcp_context:
-                        augmented_msg = f"{user_msg}\n\n=== КОНТЕКСТ ИЗ 24/7 MCP ПЛАНИРОВЩИКА ==={mcp_context}"
-                        result = agent.chat(augmented_msg)
-                    else:
-                        result = agent.chat(user_msg)
+                    result = agent.chat(user_msg, mcp_clients=[scheduler_client, git_client])
 
                 self._send_json(result)
 
@@ -545,6 +546,26 @@ class Handler(BaseHTTPRequestHandler):
                 tool_name = data.get("tool", "")
                 args = data.get("args", {})
                 res = scheduler_client.call_tool(tool_name, args)
+
+                if tool_name == "get_unshown_popups":
+                    try:
+                        parsed = json.loads(res)
+                        popups = parsed.get("popups", [])
+                        if popups:
+                            with _LOCK:
+                                for p in popups:
+                                    popup_text = f"🔔 **[СРАБОТАЛО НАПОМИНАНИЕ ПЛАНИРОВЩИКА 24/7]**:\n\n⏰ **{p.get('text')}**\n*(Время срабатывания: {p.get('target_time')})*"
+                                    agent.history.append({
+                                        "role": "assistant",
+                                        "content": popup_text,
+                                        "model": "24/7 MCP Scheduler",
+                                        "time": 0.01,
+                                        "usage": {}
+                                    })
+                                agent._save_state()
+                    except Exception as e:
+                        print(f"Error handling popups in history: {e}")
+
                 self._send_json({"result": res})
 
             elif path == "/api/mcp/git/call":
