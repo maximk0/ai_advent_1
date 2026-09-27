@@ -169,12 +169,6 @@ def create_branch_readme(day_number: str, topic: str, learned_info: str, branch_
 
 ## 💡 Новые знания и концепции, изученные за день
 {learned_info.strip()}
-
----
-
-## 🔗 Ссылки для сдачи в Google Таблицу
-- **Код:** `код (ветка {branch}): {final_code_link}`
-- **Видео:** `видео: {final_video_link}`
 """
 
     readme_file = ROOT_DIR / "README.md"

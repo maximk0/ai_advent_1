@@ -5,3 +5,5 @@ __pycache__/
 history.json
 .DS_Store
 .env
+.idea
+.artifacts

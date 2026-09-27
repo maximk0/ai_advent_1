@@ -565,7 +565,7 @@ class Handler(BaseHTTPRequestHandler):
                     mcp_context = ""
                     lower_msg = user_msg.lower()
 
-                    if any(k in lower_msg for k in ["сдай", "сдать", "задани", "день 17", "пуш", "запуш", "push", "коммит"]):
+                    if any(k in lower_msg for k in ["сдай", "сдать", "задани", "день 17", "пуш", "запуш", "push", "коммит", "редми", "readme"]):
                         # 1. Извлекаем имя ветки
                         branch_name = "day17"
                         if "ветк" in lower_msg:
@@ -580,7 +580,16 @@ class Handler(BaseHTTPRequestHandler):
                         status_res = mcp_client.call_tool("git_status_check", {})
                         mcp_context += f"\n[MCP Tool: git_status_check] ->\n{status_res}\n"
 
-                        # 3. Выполняем ТОЧЕЧНЫЙ коммит и git push на GitHub
+                        # 3. Автоматически создаем/обновляем README.md перед пушем
+                        readme_res = mcp_client.call_tool("create_branch_readme", {
+                            "day_number": "17",
+                            "topic": "Первый инструмент MCP",
+                            "learned_info": "Создание точечного Git MCP сервера, работа с ветками, автоматическое создание README.md и форматирование комментариев сдачи.",
+                            "branch_name": branch_name
+                        })
+                        mcp_context += f"\n[MCP Tool: create_branch_readme] ->\n{readme_res}\n"
+
+                        # 4. Выполняем ТОЧЕЧНЫЙ коммит и git push на GitHub
                         push_res = mcp_client.call_tool("git_commit_and_push", {
                             "branch_name": branch_name,
                             "target_files": ["day17.py", "mcp_server_git.py", "mcp_client.py", "simple_agent.py", "assignments_state.json", "README.md"],
@@ -588,7 +597,7 @@ class Handler(BaseHTTPRequestHandler):
                         })
                         mcp_context += f"\n[MCP Tool: git_commit_and_push] ->\n{push_res}\n"
 
-                        # 4. Формируем комментарии для Google Таблицы
+                        # 5. Формируем комментарии для Google Таблицы
                         comments_res = mcp_client.call_tool("format_submission_comments", {
                             "day_number": "17",
                             "branch_name": branch_name,
