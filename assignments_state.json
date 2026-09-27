@@ -7,8 +7,10 @@
       "video_link": "https://youtu.be/day17_mcp_demo",
       "code_comment": "код (ветка day17): https://github.com/user/ai_advent_1/blob/day17/day17.py",
       "video_comment": "видео: https://youtu.be/day17_mcp_demo",
-      "updated_at": "2026-09-27 22:42:25",
-      "status": "fully_submitted"
+      "updated_at": "2026-09-27 22:46:31",
+      "status": "fully_submitted",
+      "topic": "Первый инструмент MCP",
+      "has_readme": true
     }
   }
 }
