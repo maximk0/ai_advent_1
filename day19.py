@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""День 18: Планировщик и фоновые задачи 24/7 (MCP Scheduler & Aggregated Summary)
-   Полная интеграция фонового MCP-планировщика, сохранение 100% сайдбара прошлых дней
-   (Законы 🔒, TSM 🛤, Профили 🎭, Память LTM/WM 🧠, Git MCP 🐙).
+"""День 19: Композиция MCP-инструментов (Пайплайн: Search -> Summarize -> SaveToFile)
+   Полная интеграция MCP-пайплайна с сохраненным 100% сайдбаром прошлых дней
+   (Законы 🔒, TSM 🛤, Профили 🎭, Память LTM/WM 🧠, Git 🐙, Scheduler ⏰).
 """
 
 from __future__ import annotations
@@ -18,17 +18,18 @@ from chat_ui import get_chat_page
 from mcp_client import MCPClient
 
 ROOT = Path(__file__).resolve().parent
-PORT = 8018
+PORT = 8019
 _LOCK = threading.Lock()
 
 # Инициализируем Агента
 agent = SimpleAgent()
 
-# Инициализируем MCP клиенты (Планировщик + Git)
+# Инициализируем MCP клиенты (Пайплайн + Планировщик + Git)
+pipeline_client = MCPClient(ROOT / "mcp_server_pipeline.py")
 scheduler_client = MCPClient(ROOT / "mcp_server_scheduler.py")
 git_client = MCPClient(ROOT / "mcp_server_git.py")
 
-# Полный HTML сайдбара: Дни 15–17 + День 18 (24/7 Scheduler & Summary)
+# Полный HTML сайдбара: Дни 15-18 + День 19 (Composed Pipeline)
 SIDEBAR_STATS_HTML = """
 <!-- 1. ИНВАРИАНТЫ (Законы) -->
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
@@ -125,38 +126,28 @@ SIDEBAR_STATS_HTML = """
   </div>
 </div>
 
-<!-- 6. GIT MCP ASSIGNMENT (День 17) -->
+<!-- 6. ДЕНЬ 19: COMPOSED PIPELINE (Search -> Summarize -> Save) -->
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
-  <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem; color: #38bdf8;">🐙 Git MCP Assignment:</label>
-  <div style="display: flex; gap: 4px;">
-    <button onclick="runGitStatusCheck()" style="flex:1; padding: 4px; font-size: 0.65rem; background: var(--border); border: none; border-radius: 4px; color: white; cursor: pointer;">🔍 Git Статус</button>
-    <button onclick="runGitPush()" style="flex:1; padding: 4px; font-size: 0.65rem; background: #38bdf8; border: none; border-radius: 4px; color: #000; font-weight: bold; cursor: pointer;">🚀 Git Push (day18)</button>
-  </div>
-</div>
-
-<!-- 7. ДЕНЬ 18: 24/7 SCHEDULER & BACKGROUND JOBS MCP -->
-<div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
-  <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem; color: #f59e0b;">⏰ 24/7 MCP Scheduler & Summary (День 18):</label>
-  <div style="background: rgba(245, 158, 11, 0.05); padding: 8px; border-radius: 6px; border: 1px solid rgba(245, 158, 11, 0.2); font-size: 0.75rem; margin-bottom: 8px; display: flex; flex-direction: column; gap: 4px;">
-    <div><b style="color: var(--accent);">Статус Демона:</b> <span id="schStatus" style="color: #4ade80;">🟢 Активен (24/7)</span></div>
-    <div><b style="color: var(--accent);">Сервер:</b> <span id="schServerName" style="color: var(--text-main);">scheduler-247-server v1.0.0</span></div>
+  <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem; color: #ec4899;">⛓️ Композиция Пайплайна MCP (День 19):</label>
+  <div style="background: rgba(236, 72, 153, 0.05); padding: 8px; border-radius: 6px; border: 1px solid rgba(236, 72, 153, 0.2); font-size: 0.75rem; margin-bottom: 8px; display: flex; flex-direction: column; gap: 4px;">
+    <div><b style="color: var(--accent);">Статус Пайплайна:</b> <span id="pipeStatus" style="color: #4ade80;">🟢 Активен (stdio)</span></div>
+    <div><b style="color: var(--accent);">Сервер:</b> <span id="pipeServerName" style="color: var(--text-main);">pipeline-composer-server</span></div>
   </div>
 
   <div style="background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; border: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px;">
-    <span style="font-size: 0.7rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Создать отложенное напоминание:</span>
-    <input type="text" id="remText" placeholder="Текст напоминания..." value="Записать видео 18-го дня" class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto;">
-    <div style="display: flex; gap: 4px;">
-      <input type="number" id="remDelay" value="15" placeholder="Секунд (15)" class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto; flex: 1;">
-      <button onclick="runAddReminder()" style="padding: 4px 8px; font-size: 0.65rem; background: #f59e0b; border: none; border-radius: 4px; color: #000; font-weight: bold; cursor: pointer;">⏰ Поставить</button>
+    <span style="font-size: 0.7rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Параметры цепочки:</span>
+    <input type="text" id="pipeQuery" value="mcp" placeholder="Поисковый запрос (mcp, git)" class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto;">
+    <input type="text" id="pipeFilename" value="pipeline_report.md" placeholder="Имя файла отчета (.md)" class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto;">
+
+    <div style="display: flex; gap: 4px; margin-top: 2px;">
+      <button onclick="runPipelineSearch()" style="flex:1; padding: 4px; font-size: 0.65rem; background: var(--border); border: none; border-radius: 4px; color: white; cursor: pointer;">🔍 1. Search</button>
+      <button onclick="runPipelineSummarize()" style="flex:1; padding: 4px; font-size: 0.65rem; background: var(--border); border: none; border-radius: 4px; color: white; cursor: pointer;">📝 2. Summarize</button>
+      <button onclick="runPipelineSave()" style="flex:1; padding: 4px; font-size: 0.65rem; background: var(--border); border: none; border-radius: 4px; color: white; cursor: pointer;">💾 3. Save</button>
     </div>
+    <button onclick="runCompletePipeline()" style="width:100%; padding: 6px; font-size: 0.75rem; background: linear-gradient(135deg, #ec4899, #8b5cf6); border: none; border-radius: 6px; color: white; font-weight: bold; cursor: pointer; box-shadow: 0 0 10px rgba(236,72,153,0.3); margin-top: 2px;">⚡ Запустить полный пайплайн (1➔2➔3)</button>
   </div>
 
-  <div style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px;">
-    <button onclick="runGetSummary()" style="width:100%; padding: 6px; font-size: 0.75rem; background: linear-gradient(135deg, #a855f7, #6366f1); border: none; border-radius: 6px; color: white; font-weight: bold; cursor: pointer; box-shadow: 0 0 10px rgba(168,85,247,0.3);">📊 Сформировать 24/7 Сводку (Summary)</button>
-    <button onclick="runListJobs()" style="width:100%; padding: 4px; font-size: 0.65rem; background: var(--border); border: none; border-radius: 4px; color: white; cursor: pointer;">🔍 Активные задачи и логи</button>
-  </div>
-
-  <div id="schConsole" style="display: none; background: #000; padding: 6px; border-radius: 6px; font-family: monospace; font-size: 0.65rem; max-height: 120px; overflow-y: auto; color: #f59e0b; white-space: pre-wrap; border: 1px solid var(--border); line-height: 1.3;"></div>
+  <div id="pipeConsole" style="display: none; background: #000; padding: 6px; border-radius: 6px; font-family: monospace; font-size: 0.65rem; max-height: 130px; overflow-y: auto; color: #ec4899; white-space: pre-wrap; border: 1px solid var(--border); line-height: 1.3;"></div>
 </div>
 
 <!-- TOKEN STATS -->
@@ -267,11 +258,11 @@ async function refreshUI() {
         renderMap('ltmList', state.ltm, "Нет долговременных фактов");
         renderMap('wmList', state.wm, "Нет активных данных задачи");
 
-        // 5. ДЕНЬ 18: Scheduler Status
-        if (state.scheduler_mcp) {
-            const isConn = state.scheduler_mcp.is_connected;
-            document.getElementById('schStatus').textContent = isConn ? '🟢 Активен (24/7)' : '🔴 Отключен';
-            document.getElementById('schStatus').style.color = isConn ? '#4ade80' : '#f87171';
+        // 5. ДЕНЬ 19: Pipeline Status
+        if (state.pipeline_mcp) {
+            const isConn = state.pipeline_mcp.is_connected;
+            document.getElementById('pipeStatus').textContent = isConn ? '🟢 Активен (stdio)' : '🔴 Отключен';
+            document.getElementById('pipeStatus').style.color = isConn ? '#4ade80' : '#f87171';
         }
 
         // Чат
@@ -282,7 +273,7 @@ async function refreshUI() {
                 addMessage(isBot ? 'bot' : 'user', m.content, isBot ? {model: m.model, time: m.time, usage: m.usage} : null);
             });
         } else {
-            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! Я агент с **24/7 Фоновым MCP Планировщиком**. Попроси меня «Напомни записать видео через 20 секунд» или «Сформируй суточный summary»! ⏰📊</div></div>';
+            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! Я агент с **Композицией MCP-инструментов (Пайплайн: Search ➔ Summarize ➔ Save)**. Попроси меня «Найди информацию по мсп, сделай суммаризацию и сохрани в файл report.md»! ⛓️⚡</div></div>';
         }
 
         if (state.stats) {
@@ -292,47 +283,12 @@ async function refreshUI() {
     } catch (e) { console.error(e); }
 }
 
-async function checkPopups() {
-    try {
-        const res = await fetch('/api/mcp/scheduler/call', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({tool: 'get_unshown_popups', args: {}})
-        });
-        const data = await res.json();
-        if (data.result) {
-            const parsed = JSON.parse(data.result);
-            if (parsed.popups && parsed.popups.length > 0) {
-                parsed.popups.forEach(p => {
-                    showToastNotification(`⏰ ${p.text} (${p.target_time})`);
-                });
-                refreshUI();
-            }
-        }
-    } catch(e) {}
-}
-
-function showToastNotification(text) {
-    let toast = document.getElementById('toastNotification');
-    if (!toast) {
-        toast = document.createElement('div');
-        toast.id = 'toastNotification';
-        toast.style = 'position:fixed; top:20px; right:20px; z-index:9999; background:#f59e0b; color:#000; padding:12px 18px; border-radius:10px; font-weight:bold; font-size:0.85rem; box-shadow:0 4px 15px rgba(245,158,11,0.5); border:2px solid #fff; max-width:320px;';
-        document.body.appendChild(toast);
-    }
-    toast.innerHTML = `🔔 <b>СРАБОТАЛО НАПОМИНАНИЕ 24/7:</b><br>${text}`;
-    toast.style.display = 'block';
-    setTimeout(() => { if (toast) toast.style.display = 'none'; }, 8000);
-}
-
-setInterval(checkPopups, 3000);
-
-async function callSchedulerTool(toolName, args = {}) {
-    const consoleEl = document.getElementById('schConsole');
+async function callPipelineTool(toolName, args = {}) {
+    const consoleEl = document.getElementById('pipeConsole');
     consoleEl.style.display = 'block';
-    consoleEl.textContent = `⏳ Выполнение MCP планировщика ${toolName}...`;
+    consoleEl.textContent = `⏳ Выполнение MCP инструмента ${toolName}...`;
     try {
-        const res = await fetch('/api/mcp/scheduler/call', {
+        const res = await fetch('/api/mcp/pipeline/call', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({tool: toolName, args: args})
@@ -344,38 +300,69 @@ async function callSchedulerTool(toolName, args = {}) {
     }
 }
 
-function runAddReminder() {
-    const txt = document.getElementById('remText').value || 'Напоминание';
-    const delay = parseInt(document.getElementById('remDelay').value) || 15;
-    callSchedulerTool('add_reminder', {text: txt, delay_seconds: delay});
-}
+let lastSearchText = "";
 
-function runGetSummary() {
-    callSchedulerTool('get_aggregated_summary', {});
-}
-
-function runListJobs() {
-    callSchedulerTool('list_active_jobs', {});
-}
-
-async function callGitMcpTool(toolName, args = {}) {
+async function runPipelineSearch() {
+    const q = document.getElementById('pipeQuery').value || 'mcp';
+    const consoleEl = document.getElementById('pipeConsole');
+    consoleEl.style.display = 'block';
+    consoleEl.textContent = `⏳ Шаг 1: Поиск (${q})...`;
     try {
-        const res = await fetch('/api/mcp/git/call', {
+        const res = await fetch('/api/mcp/pipeline/call', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({tool: toolName, args: args})
+            body: JSON.stringify({tool: 'pipeline_search', args: {query: q}})
         });
         const data = await res.json();
-        alert(data.result || data.error || 'Готово');
-    } catch(e) { alert("Ошибка: " + e.message); }
+        lastSearchText = data.result || "";
+        consoleEl.textContent = `> [Шаг 1: Search] выполнен.\nРезультат (первые 400 символов):\n${lastSearchText.substring(0, 400)}...`;
+    } catch(e) { consoleEl.textContent = '❌ Ошибка поиска: ' + e.message; }
 }
 
-function runGitStatusCheck() { callGitMcpTool('git_status_check', {}); }
-function runGitPush() {
-    callGitMcpTool('git_commit_and_push', {
-        branch_name: 'day18',
-        target_files: ['day18.py', 'mcp_server_scheduler.py', 'scheduler_db.json', 'README.md']
-    });
+async function runPipelineSummarize() {
+    if (!lastSearchText) {
+        await runPipelineSearch();
+    }
+    const consoleEl = document.getElementById('pipeConsole');
+    consoleEl.style.display = 'block';
+    consoleEl.textContent = `⏳ Шаг 2: Суммаризация данных...`;
+    try {
+        const res = await fetch('/api/mcp/pipeline/call', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tool: 'pipeline_summarize', args: {raw_text: lastSearchText}})
+        });
+        const data = await res.json();
+        lastSummaryText = data.result || "";
+        consoleEl.textContent = `> [Шаг 2: Summarize] выполнен.\nОтчет (первые 400 символов):\n${lastSummaryText.substring(0, 400)}...`;
+    } catch(e) { consoleEl.textContent = '❌ Ошибка суммаризации: ' + e.message; }
+}
+
+let lastSummaryText = "";
+
+async function runPipelineSave() {
+    if (!lastSummaryText) {
+        await runPipelineSummarize();
+    }
+    const fname = document.getElementById('pipeFilename').value || 'pipeline_report.md';
+    const consoleEl = document.getElementById('pipeConsole');
+    consoleEl.style.display = 'block';
+    consoleEl.textContent = `⏳ Шаг 3: Сохранение в файл (${fname})...`;
+    try {
+        const res = await fetch('/api/mcp/pipeline/call', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tool: 'pipeline_save_to_file', args: {filename: fname, content: lastSummaryText}})
+        });
+        const data = await res.json();
+        consoleEl.textContent = `> [Шаг 3: SaveToFile] выполнен.\n${data.result || 'Сохранено'}`;
+    } catch(e) { consoleEl.textContent = '❌ Ошибка сохранения: ' + e.message; }
+}
+
+async function runCompletePipeline() {
+    const q = document.getElementById('pipeQuery').value || 'mcp';
+    const fname = document.getElementById('pipeFilename').value || 'complete_pipeline_report.md';
+    callPipelineTool('run_complete_pipeline', {query: q, output_filename: fname});
 }
 
 async function forceTransition(stage) {
@@ -492,7 +479,7 @@ addMessage = function(role, content, meta) {
         let ind = "";
         if (content.includes("🧠")) ind += `<span style="background:rgba(168,85,247,0.2); border:1px solid var(--accent); padding:2px 6px; border-radius:4px; font-size:0.75rem; margin-right:5px;">🧠 LTM</span>`;
         if (content.includes("🛠")) ind += `<span style="background:rgba(59,130,246,0.2); border:1px solid #3b82f6; padding:2px 6px; border-radius:4px; font-size:0.75rem; margin-right:5px;">🛠 WM</span>`;
-        if (content.includes("⏰") || content.includes("Summary") || content.includes("Планировщик")) ind += `<span style="background:rgba(245,158,11,0.2); border:1px solid #f59e0b; padding:2px 6px; border-radius:4px; font-size:0.75rem;">⏰ 24/7 Scheduler</span>`;
+        if (content.includes("⛓️") || content.includes("Пайплайн") || content.includes("отчет")) ind += `<span style="background:rgba(236,72,153,0.2); border:1px solid #ec4899; padding:2px 6px; border-radius:4px; font-size:0.75rem;">⛓️ MCP Pipeline</span>`;
         if (ind) {
             const m = res.querySelector('.msg-meta');
             if (m) { const c = document.createElement('div'); c.style="margin-top:5px; display:flex; gap:5px;"; c.innerHTML=ind; res.insertBefore(c, m); }
@@ -510,10 +497,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             with _LOCK:
                 state = agent.get_state()
-                tools_list = scheduler_client.refresh_tools()
-                state["scheduler_mcp"] = {
-                    "is_connected": scheduler_client.is_connected,
-                    "server_info": scheduler_client.server_info,
+                tools_list = pipeline_client.refresh_tools()
+                state["pipeline_mcp"] = {
+                    "is_connected": pipeline_client.is_connected,
+                    "server_info": pipeline_client.server_info,
                     "tools": tools_list
                 }
                 self._send_json(state)
@@ -521,7 +508,7 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        page_html = get_chat_page(title="24/7 MCP Scheduler Agent — День 18", extra_sidebar_html=SIDEBAR_STATS_HTML, extra_scripts=EXTRA_SCRIPTS)
+        page_html = get_chat_page(title="Composed Pipeline MCP Agent — День 19", extra_sidebar_html=SIDEBAR_STATS_HTML, extra_scripts=EXTRA_SCRIPTS)
         body = page_html.encode("utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -537,42 +524,16 @@ class Handler(BaseHTTPRequestHandler):
                 user_msg = data.get("message", "")
                 with _LOCK:
                     agent.set_config(data.get("config", {}))
-                    result = agent.chat(user_msg, mcp_clients=[scheduler_client, git_client])
+                    # Передаем все клиенты в нативный Tool Calling Loop
+                    result = agent.chat(user_msg, mcp_clients=[pipeline_client, scheduler_client, git_client])
 
                 self._send_json(result)
 
-            elif path == "/api/mcp/scheduler/call":
+            elif path == "/api/mcp/pipeline/call":
                 data = json.loads(raw_body)
                 tool_name = data.get("tool", "")
                 args = data.get("args", {})
-                res = scheduler_client.call_tool(tool_name, args)
-
-                if tool_name == "get_unshown_popups":
-                    try:
-                        parsed = json.loads(res)
-                        popups = parsed.get("popups", [])
-                        if popups:
-                            with _LOCK:
-                                for p in popups:
-                                    popup_text = f"🔔 **[СРАБОТАЛО НАПОМИНАНИЕ ПЛАНИРОВЩИКА 24/7]**:\n\n⏰ **{p.get('text')}**\n*(Время срабатывания: {p.get('target_time')})*"
-                                    agent.history.append({
-                                        "role": "assistant",
-                                        "content": popup_text,
-                                        "model": "24/7 MCP Scheduler",
-                                        "time": 0.01,
-                                        "usage": {}
-                                    })
-                                agent._save_state()
-                    except Exception as e:
-                        print(f"Error handling popups in history: {e}")
-
-                self._send_json({"result": res})
-
-            elif path == "/api/mcp/git/call":
-                data = json.loads(raw_body)
-                tool_name = data.get("tool", "")
-                args = data.get("args", {})
-                res = git_client.call_tool(tool_name, args)
+                res = pipeline_client.call_tool(tool_name, args)
                 self._send_json({"result": res})
 
             elif path == "/api/config":
@@ -649,10 +610,11 @@ def load_env() -> None:
 
 if __name__ == "__main__":
     load_env()
-    print(f"🚀 День 18 24/7 Scheduler MCP Agent & Sidebar: http://127.0.0.1:{PORT}")
+    print(f"🚀 День 19 Composed Pipeline MCP Agent & Sidebar: http://127.0.0.1:{PORT}")
     try:
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
     except KeyboardInterrupt:
+        pipeline_client.close()
         scheduler_client.close()
         git_client.close()
         sys.exit(0)
