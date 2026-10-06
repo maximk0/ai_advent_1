@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-"""День 20: Orchestration MCP (Многосерверная оркестрация)
-   Одновременная регистрация и вызов инструментов из 4 разных MCP-серверов:
-   1. Project Inspector (mcp_server_project.py)
-   2. Git Manager (mcp_server_git.py)
-   3. 24/7 Scheduler (mcp_server_scheduler.py)
-   4. Composed Pipeline (mcp_server_pipeline.py)
-   С сохранением 100% сайдбара прошлых дней.
+"""День 21: Индексация документов и сравнение стратегий Chunking (RAG MCP)
+   Полная интеграция MCP-сервера индексации, сохранение 100% сайдбара прошлых дней
+   (Законы 🔒, TSM 🛤, Профили 🎭, Память LTM/WM 🧠, Git 🐙, Scheduler ⏰, Pipeline ⛓️, Orchestrator 🎛️).
 """
 
 from __future__ import annotations
@@ -22,19 +18,19 @@ from chat_ui import get_chat_page
 from mcp_client import MCPClient
 
 ROOT = Path(__file__).resolve().parent
-PORT = 8020
+PORT = 8001
 _LOCK = threading.Lock()
 
 # Инициализируем Агента
 agent = SimpleAgent()
 
-# Инициализируем ВСЕ 4 MCP КЛИЕНТА ДЛЯ ОРКЕСТРАЦИИ
-project_client = MCPClient(ROOT / "mcp_server_project.py")
-git_client = MCPClient(ROOT / "mcp_server_git.py")
-scheduler_client = MCPClient(ROOT / "mcp_server_scheduler.py")
+# Инициализируем MCP клиенты (Индексатор + Пайплайн + Планировщик + Git)
+indexer_client = MCPClient(ROOT / "mcp_server_indexer.py")
 pipeline_client = MCPClient(ROOT / "mcp_server_pipeline.py")
+scheduler_client = MCPClient(ROOT / "mcp_server_scheduler.py")
+git_client = MCPClient(ROOT / "mcp_server_git.py")
 
-# Полный HTML сайдбара: Дни 15-19 + День 20 (Multi-Server Orchestrator)
+# Полный HTML сайдбара: Дни 15-20 + День 21 (Document Indexing & RAG)
 SIDEBAR_STATS_HTML = """
 <!-- 1. ИНВАРИАНТЫ (Законы) -->
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
@@ -131,20 +127,31 @@ SIDEBAR_STATS_HTML = """
   </div>
 </div>
 
-<!-- 6. ДЕНЬ 20: MULTI-SERVER ORCHESTRATOR -->
+<!-- 6. ДЕНЬ 21: DOCUMENT INDEXING & RAG CHUNKING -->
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
-  <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem; color: #06b6d4;">🎛️ MCP Multi-Server Orchestrator (День 20):</label>
-  <div style="background: rgba(6, 182, 212, 0.05); padding: 8px; border-radius: 6px; border: 1px solid rgba(6, 182, 212, 0.2); font-size: 0.75rem; margin-bottom: 8px; display: flex; flex-direction: column; gap: 4px;">
-    <div><b style="color: var(--accent);">🔌 Серверов подключено:</b> <span id="orchServersCount" style="color: #4ade80;">4 / 4 (Active)</span></div>
-    <div><b style="color: var(--accent);">🛠️ Всего инструментов:</b> <span id="orchToolsCount" style="color: #38bdf8;">14 tools</span></div>
+  <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem; color: #10b981;">📚 Document Indexing & RAG (День 21):</label>
+  <div style="background: rgba(16, 185, 129, 0.05); padding: 8px; border-radius: 6px; border: 1px solid rgba(16, 185, 129, 0.2); font-size: 0.75rem; margin-bottom: 8px; display: flex; flex-direction: column; gap: 4px;">
+    <div><b style="color: var(--accent);">Статус Indexer:</b> <span id="idxStatus" style="color: #4ade80;">🟢 Активен (stdio)</span></div>
+    <div><b style="color: var(--accent);">Сервер:</b> <span id="idxServerName" style="color: var(--text-main);">document-indexer-server</span></div>
   </div>
 
   <div style="background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; border: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px;">
-    <span style="font-size: 0.7rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Кросс-серверный сценарий:</span>
-    <button onclick="runOrchestratedWorkflow()" style="width:100%; padding: 6px; font-size: 0.75rem; background: linear-gradient(135deg, #06b6d4, #3b82f6); border: none; border-radius: 6px; color: white; font-weight: bold; cursor: pointer; box-shadow: 0 0 10px rgba(6,182,212,0.3);">⚡ Запустить оркестрацию (Project + Pipeline + Scheduler + Git)</button>
+    <span style="font-size: 0.7rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Параметры RAG индекса:</span>
+    <input type="text" id="idxQuery" value="mcp" placeholder="Поисковый запрос (mcp, rag)..." class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto;">
+    <select id="idxStrategy" class="input-field" style="font-size: 0.7rem; padding: 3px 6px; height: auto;">
+      <option value="all">Все стратегии (All)</option>
+      <option value="fixed_size">Фиксированный размер (Fixed Size)</option>
+      <option value="structural" selected>По структуре (Structural)</option>
+    </select>
+
+    <div style="display: flex; gap: 4px; margin-top: 2px;">
+      <button onclick="runBuildIndex(this)" style="flex:1; padding: 5px; font-size: 0.65rem; background: #10b981; border: none; border-radius: 4px; color: #000; font-weight: bold; cursor: pointer;">⚙️ Индекс</button>
+      <button onclick="runCompareStrategies(this)" style="flex:1; padding: 5px; font-size: 0.65rem; background: #6366f1; border: none; border-radius: 4px; color: white; font-weight: bold; cursor: pointer;">⚖️ Сравнить</button>
+    </div>
+    <button onclick="runIndexSearch(this)" style="width:100%; padding: 6px; font-size: 0.75rem; background: linear-gradient(135deg, #10b981, #06b6d4); border: none; border-radius: 6px; color: white; font-weight: bold; cursor: pointer; box-shadow: 0 0 10px rgba(16,185,129,0.3); margin-top: 2px;">🔍 Поиск по индексу (RAG)</button>
   </div>
 
-  <div id="orchConsole" style="display: none; background: #000; padding: 6px; border-radius: 6px; font-family: monospace; font-size: 0.65rem; max-height: 130px; overflow-y: auto; color: #06b6d4; white-space: pre-wrap; border: 1px solid var(--border); line-height: 1.3;"></div>
+  <div id="idxConsole" style="display: none; background: #000; padding: 6px; border-radius: 6px; font-family: monospace; font-size: 0.65rem; max-height: 130px; overflow-y: auto; color: #10b981; white-space: pre-wrap; border: 1px solid var(--border); line-height: 1.3;"></div>
 </div>
 
 <!-- TOKEN STATS -->
@@ -255,12 +262,11 @@ async function refreshUI() {
         renderMap('ltmList', state.ltm, "Нет долговременных фактов");
         renderMap('wmList', state.wm, "Нет активных данных задачи");
 
-        // 5. ДЕНЬ 20: Orchestrator Status
-        if (state.orchestrator_mcp) {
-            const activeCount = state.orchestrator_mcp.active_servers || 4;
-            const toolsCount = state.orchestrator_mcp.total_tools || 14;
-            document.getElementById('orchServersCount').textContent = `${activeCount} / 4 (Active)`;
-            document.getElementById('orchToolsCount').textContent = `${toolsCount} tools`;
+        // 5. ДЕНЬ 21: Indexer Status
+        if (state.indexer_mcp) {
+            const isConn = state.indexer_mcp.is_connected;
+            document.getElementById('idxStatus').textContent = isConn ? '🟢 Активен (stdio)' : '🔴 Отключен';
+            document.getElementById('idxStatus').style.color = isConn ? '#4ade80' : '#f87171';
         }
 
         // Чат
@@ -271,7 +277,7 @@ async function refreshUI() {
                 addMessage(isBot ? 'bot' : 'user', m.content, isBot ? {model: m.model, time: m.time, usage: m.usage} : null);
             });
         } else {
-            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! Я агент с **Многосерверной Оркестрацией MCP (День 20)**. Подключено 4 независимых сервера (Project Inspector, Git Manager, Scheduler, Pipeline). Напиши сложную задачу, и я сам выберу нужные инструменты с разных серверов! 🎛️⚡</div></div>';
+            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! Я агент с **Индексацией документов и сравнением стратегий Chunking (День 21)**. Попроси меня «Построй индекс документов», «Сравни стратегии chunking» или «Найди в документах информацию по мсп»! 📚🔍</div></div>';
         }
 
         if (state.stats) {
@@ -281,64 +287,72 @@ async function refreshUI() {
     } catch (e) { console.error(e); }
 }
 
-async function checkPopups() {
-    try {
-        const res = await fetch('/api/mcp/scheduler/call', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({tool: 'get_unshown_popups', args: {}})
-        });
-        const data = await res.json();
-        if (data.result) {
-            const parsed = JSON.parse(data.result);
-            if (parsed.popups && parsed.popups.length > 0) {
-                parsed.popups.forEach(p => {
-                    showToastNotification(`⏰ ${p.text} (${p.target_time})`);
-                });
-                refreshUI();
-            }
-        }
-    } catch(e) {}
-}
-
-function showToastNotification(text) {
-    let toast = document.getElementById('toastNotification');
-    if (!toast) {
-        toast = document.createElement('div');
-        toast.id = 'toastNotification';
-        toast.style = 'position:fixed; top:20px; right:20px; z-index:9999; background:#f59e0b; color:#000; padding:12px 18px; border-radius:10px; font-weight:bold; font-size:0.85rem; box-shadow:0 4px 15px rgba(245,158,11,0.5); border:2px solid #fff; max-width:320px;';
-        document.body.appendChild(toast);
+async function callIndexerTool(toolName, args = {}, btnEl = null) {
+    console.log("[RAG UI] Button clicked for tool:", toolName, args);
+    const consoleEl = document.getElementById('idxConsole');
+    if (!consoleEl) {
+        alert("Ошибка: элемент #idxConsole не найден в DOM!");
+        return;
     }
-    toast.innerHTML = `🔔 <b>СРАБОТАЛО НАПОМИНАНИЕ 24/7:</b><br>${text}`;
-    toast.style.display = 'block';
-    setTimeout(() => { if (toast) toast.style.display = 'none'; }, 8000);
-}
-
-setInterval(checkPopups, 3000);
-
-async function runOrchestratedWorkflow() {
-    const consoleEl = document.getElementById('orchConsole');
     consoleEl.style.display = 'block';
-    consoleEl.textContent = `⚡ Запуск кросс-серверного оркестрационного сценария...\\n( Project Inspector ➔ Pipeline Search ➔ Scheduler Reminder ➔ Git Push )`;
+    consoleEl.textContent = `⚡ [Клик зафиксирован] Запрос инструмента ${toolName}...`;
+    consoleEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+    let origText = "";
+    if (btnEl) {
+        origText = btnEl.textContent;
+        btnEl.textContent = '⏳ Ждите...';
+        btnEl.disabled = true;
+        btnEl.style.opacity = '0.7';
+    }
 
     try {
-        const res = await fetch('/api/chat', {
+        const res = await fetch('/api/mcp/indexer/call', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                message: "Проверь структуру проекта через Project Inspector, выполни поиск и сохранение отчета через Pipeline, поставь напоминание через 30 секунд в Scheduler и сделай git push в ветку day20!",
-                config: {
-                    system_prompt: document.getElementById('sysPrompt').value,
-                    model: document.getElementById('modelSelect').value
-                }
-            })
+            body: JSON.stringify({tool: toolName, args: args})
         });
         const data = await res.json();
-        consoleEl.textContent += `\\n\\n✅ Флоу оркестрации завершен!\\nОтвет агента:\\n${data.content || data.error}`;
-        refreshUI();
+        console.log("[RAG UI] Response received:", data);
+        let displayStr = data.result || data.error || 'Нет ответа';
+        try {
+            const parsed = JSON.parse(displayStr);
+            if (toolName === 'build_document_index') {
+                displayStr = `✅ ИНДЕКС УСПЕШНО ПОСТРОЕН!\n\n📁 Просканировано документов: ${parsed.total_documents}\n🧩 Всего создано чанков: ${parsed.total_chunks}\n\n• Fixed Size чанков: ${parsed.strategies.fixed_size.count} (ср. размер: ${Math.round(parsed.strategies.fixed_size.avg_word_count)} слов)\n• Structural чанков: ${parsed.strategies.structural.count} (ср. размер: ${Math.round(parsed.strategies.structural.avg_word_count)} слов)`;
+            } else if (toolName === 'compare_chunking_strategies') {
+                const rep = parsed.report.comparison;
+                displayStr = `⚖️ СРАВНЕНИЕ СТРАТЕГИЙ CHUNKING:\n\n1. Fixed Size (фиксированный размер):\n- Количество чанков: ${rep.fixed_size_strategy.metrics.count}\n- Ср. длина чанка: ${rep.fixed_size_strategy.metrics.avg_words} слов\n- Плюсы: ${rep.fixed_size_strategy.pros.join(', ')}\n- Минусы: ${rep.fixed_size_strategy.cons.join(', ')}\n\n2. Structural (по структуре / заголовкам):\n- Количество чанков: ${rep.structural_strategy.metrics.count}\n- Ср. длина чанка: ${rep.structural_strategy.metrics.avg_words} слов\n- Плюсы: ${rep.structural_strategy.pros.join(', ')}\n- Минусы: ${rep.structural_strategy.cons.join(', ')}`;
+            } else if (toolName === 'search_document_index') {
+                displayStr = `🔍 РЕЗУЛЬТАТЫ ПОИСКА (найдено: ${parsed.matches_count}):\n\n` + parsed.matches.map(m => `📌 [${m.strategy}] ${m.source} (${m.section})\n   "${m.text.substring(0, 140)}..."`).join('\\n\\n');
+            }
+        } catch(e) {}
+        consoleEl.textContent = displayStr;
+        consoleEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        addMessage('bot', "**[Результат MCP " + toolName + "]**\\n\\n```text\\n" + displayStr + "\\n```");
     } catch(e) {
-        consoleEl.textContent += `\\n❌ Ошибка оркестрации: ${e.message}`;
+        console.error("[RAG UI] Fetch error:", e);
+        consoleEl.textContent = `❌ Ошибка сети: ${e.message}`;
+    } finally {
+        if (btnEl) {
+            btnEl.textContent = origText;
+            btnEl.disabled = false;
+            btnEl.style.opacity = '1.0';
+        }
     }
+}
+
+async function runBuildIndex(btn) {
+    callIndexerTool('build_document_index', {}, btn);
+}
+
+async function runCompareStrategies(btn) {
+    callIndexerTool('compare_chunking_strategies', {}, btn);
+}
+
+async function runIndexSearch(btn) {
+    const q = document.getElementById('idxQuery').value || 'mcp';
+    const strat = document.getElementById('idxStrategy').value || 'all';
+    callIndexerTool('search_document_index', {query: q, strategy: strat}, btn);
 }
 
 async function forceTransition(stage) {
@@ -455,7 +469,7 @@ addMessage = function(role, content, meta) {
         let ind = "";
         if (content.includes("🧠")) ind += `<span style="background:rgba(168,85,247,0.2); border:1px solid var(--accent); padding:2px 6px; border-radius:4px; font-size:0.75rem; margin-right:5px;">🧠 LTM</span>`;
         if (content.includes("🛠")) ind += `<span style="background:rgba(59,130,246,0.2); border:1px solid #3b82f6; padding:2px 6px; border-radius:4px; font-size:0.75rem; margin-right:5px;">🛠 WM</span>`;
-        if (content.includes("🎛️") || content.includes("Оркестратор") || content.includes("пайплайн")) ind += `<span style="background:rgba(6,182,212,0.2); border:1px solid #06b6d4; padding:2px 6px; border-radius:4px; font-size:0.75rem;">🎛️ Orchestration MCP</span>`;
+        if (content.includes("📚") || content.includes("Индексация") || content.includes("индекс")) ind += `<span style="background:rgba(16,185,129,0.2); border:1px solid #10b981; padding:2px 6px; border-radius:4px; font-size:0.75rem;">📚 RAG Indexer</span>`;
         if (ind) {
             const m = res.querySelector('.msg-meta');
             if (m) { const c = document.createElement('div'); c.style="margin-top:5px; display:flex; gap:5px;"; c.innerHTML=ind; res.insertBefore(c, m); }
@@ -463,6 +477,27 @@ addMessage = function(role, content, meta) {
     }
     return res;
 };
+
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(() => {
+        const buttons = document.querySelectorAll('.sidebar button');
+        buttons.forEach(btn => {
+            const onclickAttr = btn.getAttribute('onclick');
+            if (onclickAttr) {
+                if (onclickAttr.includes('runBuildIndex')) {
+                    btn.removeAttribute('onclick');
+                    btn.addEventListener('click', () => runBuildIndex(btn));
+                } else if (onclickAttr.includes('runCompareStrategies')) {
+                    btn.removeAttribute('onclick');
+                    btn.addEventListener('click', () => runCompareStrategies(btn));
+                } else if (onclickAttr.includes('runIndexSearch')) {
+                    btn.removeAttribute('onclick');
+                    btn.addEventListener('click', () => runIndexSearch(btn));
+                }
+            }
+        });
+    }, 600);
+});
 
 initApp = refreshUI;
 """
@@ -473,23 +508,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             with _LOCK:
                 state = agent.get_state()
-                # Собираем инструменты со ВСЕХ 4 серверов
-                t1 = project_client.refresh_tools()
-                t2 = git_client.refresh_tools()
-                t3 = scheduler_client.refresh_tools()
-                t4 = pipeline_client.refresh_tools()
-                all_tools = t1 + t2 + t3 + t4
-
-                state["orchestrator_mcp"] = {
-                    "active_servers": sum([1 for c in [project_client, git_client, scheduler_client, pipeline_client] if c.is_connected]),
-                    "total_tools": len(all_tools)
+                tools_list = indexer_client.refresh_tools()
+                state["indexer_mcp"] = {
+                    "is_connected": indexer_client.is_connected,
+                    "server_info": indexer_client.server_info,
+                    "tools": tools_list
                 }
                 self._send_json(state)
                 return
 
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        page_html = get_chat_page(title="Multi-Server Orchestrator MCP — День 20", extra_sidebar_html=SIDEBAR_STATS_HTML, extra_scripts=EXTRA_SCRIPTS)
+        page_html = get_chat_page(title="Document Indexer & RAG MCP Agent — День 21", extra_sidebar_html=SIDEBAR_STATS_HTML, extra_scripts=EXTRA_SCRIPTS)
         body = page_html.encode("utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -505,15 +535,17 @@ class Handler(BaseHTTPRequestHandler):
                 user_msg = data.get("message", "")
                 with _LOCK:
                     agent.set_config(data.get("config", {}))
-                    # Передаем ВСЕ 4 клиента в нативный Tool Calling Loop
-                    result = agent.chat(user_msg, mcp_clients=[
-                        project_client,
-                        git_client,
-                        scheduler_client,
-                        pipeline_client
-                    ])
+                    # Передаем инлексер и другие клиенты в нативный Tool Calling Loop
+                    result = agent.chat(user_msg, mcp_clients=[indexer_client, pipeline_client, scheduler_client, git_client])
 
                 self._send_json(result)
+
+            elif path == "/api/mcp/indexer/call":
+                data = json.loads(raw_body)
+                tool_name = data.get("tool", "")
+                args = data.get("args", {})
+                res = indexer_client.call_tool(tool_name, args)
+                self._send_json({"result": res})
 
             elif path == "/api/config":
                 data = json.loads(raw_body)
@@ -557,47 +589,6 @@ class Handler(BaseHTTPRequestHandler):
                     agent.pin_to_ltm(data.get("key", ""), data.get("value", ""))
                 self._send_json({"status": "pinned"})
 
-            elif path == "/api/mcp/scheduler/call":
-                data = json.loads(raw_body)
-                tool_name = data.get("tool", "")
-                args = data.get("args", {})
-                res = scheduler_client.call_tool(tool_name, args)
-
-                if tool_name == "get_unshown_popups":
-                    try:
-                        parsed = json.loads(res)
-                        popups = parsed.get("popups", [])
-                        if popups:
-                            with _LOCK:
-                                for p in popups:
-                                    popup_text = f"🔔 **[СРАБОТАЛО НАПОМИНАНИЕ ПЛАНИРОВЩИКА 24/7]**:\n\n⏰ **{p.get('text')}**\n*(Время срабатывания: {p.get('target_time')})*"
-                                    agent.history.append({
-                                        "role": "assistant",
-                                        "content": popup_text,
-                                        "model": "24/7 MCP Scheduler",
-                                        "time": 0.01,
-                                        "usage": {}
-                                    })
-                                agent._save_state()
-                    except Exception as e:
-                        print(f"Error handling popups in history: {e}")
-
-                self._send_json({"result": res})
-
-            elif path == "/api/mcp/git/call":
-                data = json.loads(raw_body)
-                tool_name = data.get("tool", "")
-                args = data.get("args", {})
-                res = git_client.call_tool(tool_name, args)
-                self._send_json({"result": res})
-
-            elif path == "/api/mcp/pipeline/call":
-                data = json.loads(raw_body)
-                tool_name = data.get("tool", "")
-                args = data.get("args", {})
-                res = pipeline_client.call_tool(tool_name, args)
-                self._send_json({"result": res})
-
             elif path == "/api/tsm/update":
                 data = json.loads(raw_body)
                 with _LOCK:
@@ -628,14 +619,20 @@ def load_env() -> None:
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
 if __name__ == "__main__":
     load_env()
-    print(f"🚀 День 20 Multi-Server Orchestrator MCP Agent & Sidebar: http://127.0.0.1:{PORT}")
+    print(f"🚀 День 21 Document Indexer & RAG MCP Agent & Sidebar: http://127.0.0.1:{PORT}")
+    server = ReusableThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     try:
-        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+        server.serve_forever()
     except KeyboardInterrupt:
-        project_client.close()
-        git_client.close()
-        scheduler_client.close()
+        pass
+    finally:
+        server.server_close()
+        indexer_client.close()
         pipeline_client.close()
-        sys.exit(0)
+        scheduler_client.close()
+        git_client.close()
