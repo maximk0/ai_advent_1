@@ -2,7 +2,7 @@
 Переиспользуемый интерфейс чата для проекта AI Advent.
 """
 
-def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts=""):
+def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", extra_main_html=""):
     html = """<!doctype html>
 <html lang="ru">
 <head>
@@ -24,6 +24,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts=""):
     }
 
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
       margin: 0; padding: 0;
@@ -92,6 +93,11 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts=""):
       min-width: 0;
       height: 100%;
     }
+    .app-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .main-tabs { display: flex; gap: 8px; padding: 12px 20px 0; border-bottom: 1px solid var(--border); background: var(--bg-dark); }
+    .main-tab { border: 1px solid var(--border); border-bottom: 0; border-radius: 9px 9px 0 0; padding: 9px 16px; background: transparent; color: var(--text-dim); cursor: pointer; font: inherit; }
+    .main-tab.active { background: var(--bg-card); color: var(--text-main); border-color: var(--primary); }
+    #comparisonView { display: none; flex: 1; min-height: 0; overflow-y: auto; padding: 24px; }
 
     /* Chat Area */
     #chat-log {
@@ -359,24 +365,27 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts=""):
   </aside>
 
   <main class="main">
-    <div id="chat-log">
-      <div class="msg-wrapper msg-bot">
-        <div class="msg-bubble">Привет! Я твой персональный агент. О чем хочешь поговорить?</div>
+    {{EXTRA_MAIN_HTML}}
+    <section id="chatView" class="app-view">
+      <div id="chat-log">
+        <div class="msg-wrapper msg-bot">
+          <div class="msg-bubble">Привет! Я твой персональный агент. О чем хочешь поговорить?</div>
+        </div>
       </div>
-    </div>
 
-    <div class="input-container">
-      <form id="chatForm" class="input-box">
-        <textarea id="userInput" placeholder="Напишите сообщение..." rows="1" required autocomplete="off"></textarea>
-        <button type="submit" id="sendBtn" class="send-btn">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-        </button>
-      </form>
-      <div class="input-info">
-        <span id="charCount">Символов: 0</span>
-        <span id="tokenCount">~0 токенов</span>
+      <div class="input-container">
+        <form id="chatForm" class="input-box">
+          <textarea id="userInput" placeholder="Напишите сообщение..." rows="1" required autocomplete="off"></textarea>
+          <button type="submit" id="sendBtn" class="send-btn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          </button>
+        </form>
+        <div class="input-info">
+          <span id="charCount">Символов: 0</span>
+          <span id="tokenCount">~0 токенов</span>
+        </div>
       </div>
-    </div>
+    </section>
   </main>
 
   <script>
@@ -602,4 +611,4 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts=""):
   </script>
 </body>
 </html>"""
-    return html.replace("{{TITLE}}", title).replace("{{EXTRA_SIDEBAR_HTML}}", extra_sidebar_html).replace("{{EXTRA_SCRIPTS}}", extra_scripts)
+    return html.replace("{{TITLE}}", title).replace("{{EXTRA_SIDEBAR_HTML}}", extra_sidebar_html).replace("{{EXTRA_MAIN_HTML}}", extra_main_html).replace("{{EXTRA_SCRIPTS}}", extra_scripts)

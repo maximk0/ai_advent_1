@@ -4,6 +4,13 @@ import time
 import urllib.request
 import urllib.error
 
+LEGACY_DEFAULT_INVARIANTS = {
+    "Архитектура": "Strict MVI (Model-View-Intent) с однонаправленным потоком данных (UDF). Любые сайд-эффекты оборачивать в News/Effects.",
+    "Стек проекта": "Только чистый Kotlin, Jetpack Compose для UI и Koin для Dependency Injection. Использование Java или устаревших XML Layouts КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.",
+    "Безопасность": "Запрещено логировать, сохранять в plain-text или передавать на сторонние сервера пароли, токены и приватные ключи пользователей.",
+    "Бизнес-правило": "Все финансовые транзакции и операции с балансом пользователя должны проходить обязательную двойную верификацию локально перед отправкой в сеть."
+}
+
 class SimpleAgent:
     MODEL_DEFAULT = "openrouter/free"
     WINDOW_SIZE = 6
@@ -30,6 +37,8 @@ class SimpleAgent:
         self.top_k = 0
         self.context_compression = True
         self.planning_mode_enabled = True
+        self.rag_mode_enabled = True
+        self.invariants_enabled = False
 
         # Трехуровневая система памяти
         self.wm = {}   # Working Memory: текущая задача, активный контекст
@@ -64,12 +73,7 @@ class SimpleAgent:
         self.tsm_action = "Ожидание постановки задачи пользователем"
 
         # День 14: Жесткие инварианты и архитектурные ограничения проекта
-        self.invariants = {
-            "Архитектура": "Strict MVI (Model-View-Intent) с однонаправленным потоком данных (UDF). Любые сайд-эффекты оборачивать в News/Effects.",
-            "Стек проекта": "Только чистый Kotlin, Jetpack Compose для UI и Koin для Dependency Injection. Использование Java или устаревших XML Layouts КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.",
-            "Безопасность": "Запрещено логировать, сохранять в plain-text или передавать на сторонние сервера пароли, токены и приватные ключи пользователей.",
-            "Бизнес-правило": "Все финансовые транзакции и операции с балансом пользователя должны проходить обязательную двойную верификацию локально перед отправкой в сеть."
-        }
+        self.invariants = {}
 
         self.summary_context = ""
         self.saved_tokens = 0
@@ -99,6 +103,8 @@ class SimpleAgent:
                 "top_k": self.top_k,
                 "context_compression": self.context_compression,
                 "planning_mode_enabled": self.planning_mode_enabled,
+                "rag_mode_enabled": self.rag_mode_enabled,
+                "invariants_enabled": self.invariants_enabled,
             },
             "stats": self.get_token_stats()
         }
@@ -134,7 +140,13 @@ class SimpleAgent:
                     self.tsm_action = tsm.get("action", "Ожидание постановки задачи")
 
                 if "invariants" in state:
-                    self.invariants = state["invariants"]
+                    loaded_invariants = state["invariants"]
+                    # These four rules used to be auto-added on first launch.
+                    # Migrate them out so only rules explicitly selected by the user remain.
+                    self.invariants = {
+                        key: value for key, value in loaded_invariants.items()
+                        if LEGACY_DEFAULT_INVARIANTS.get(key) != value
+                    }
 
                 config = state.get("config", {})
                 self.system_prompt = config.get("system_prompt", self.system_prompt)
@@ -144,6 +156,8 @@ class SimpleAgent:
                 self.top_k = config.get("top_k", self.top_k)
                 self.context_compression = config.get("context_compression", True)
                 self.planning_mode_enabled = config.get("planning_mode_enabled", True)
+                self.rag_mode_enabled = config.get("rag_mode_enabled", True)
+                self.invariants_enabled = config.get("invariants_enabled", False)
             print(f"[{time.strftime('%H:%M:%S')}] State loaded from {self.STATE_FILE} ({len(self.history)} msgs)")
         except Exception as e:
             print(f"Error loading state: {e}")
@@ -157,6 +171,10 @@ class SimpleAgent:
         self.context_compression = config.get("context_compression", self.context_compression)
         if "planning_mode_enabled" in config:
             self.planning_mode_enabled = bool(config["planning_mode_enabled"])
+        if "rag_mode_enabled" in config:
+            self.rag_mode_enabled = bool(config["rag_mode_enabled"])
+        if "invariants_enabled" in config:
+            self.invariants_enabled = bool(config["invariants_enabled"])
         self._save_state()
 
     def clear_history(self, clear_all: bool = False):
@@ -167,12 +185,8 @@ class SimpleAgent:
             self.tsm_stage = "none"
             self.tsm_step = "Нет активной задачи"
             self.tsm_action = "Ожидание постановки задачи пользователем"
-            self.invariants = {
-                "Архитектура": "Strict MVI (Model-View-Intent) с однонаправленным потоком данных (UDF). Любые сайд-эффекты оборачивать в News/Effects.",
-                "Стек проекта": "Только чистый Kotlin, Jetpack Compose для UI и Koin для Dependency Injection. Использование Java или устаревших XML Layouts КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.",
-                "Безопасность": "Запрещено логировать, сохранять в plain-text или передавать на сторонние сервера пароли, токены и приватные ключи пользователей.",
-                "Бизнес-правило": "Все финансовые транзакции и операции с балансом пользователя должны проходить обязательную двойную верификацию локально перед отправкой в сеть."
-            }
+            self.invariants = {}
+            self.invariants_enabled = False
             self.summary_context = ""
             self.saved_tokens = 0
         self._save_state()
@@ -205,6 +219,10 @@ class SimpleAgent:
         if key in self.invariants:
             del self.invariants[key]
             self._save_state()
+
+    def clear_invariants(self):
+        self.invariants = {}
+        self._save_state()
 
     def switch_profile(self, profile_name: str):
         if profile_name in self.profiles:
@@ -310,19 +328,38 @@ class SimpleAgent:
         except Exception as e:
             print(f"Error in _route_memory: {e}")
 
-    def chat(self, user_message: str, mcp_clients: list = None) -> dict:
+    def chat(
+        self,
+        user_message: str,
+        mcp_clients: list = None,
+        *,
+        history: list | None = None,
+        persist_state: bool = True,
+        rag_source_prefix: str | None = None,
+    ) -> dict:
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
             return {"error": "Нет OPENROUTER_API_KEY в .env"}
 
-        # 1. Сохраняем сообщение пользователя в историю
-        self.history.append({"role": "user", "content": user_message})
-        self._save_state()
+        # Evaluation runs can supply a fresh, in-memory history and avoid
+        # changing the user's saved chat or memory state.
+        conversation_history = self.history if history is None else history
+        conversation_history.append({"role": "user", "content": user_message})
+        if persist_state:
+            self._save_state()
 
-        # 2. Формируем строку жестких инвариантов проекта
-        inv_str = "НЕТ"
-        if self.invariants:
+        # 2. Добавляем правила только тогда, когда пользователь включил их
+        # и выбрал хотя бы одно. Неактивный блок не должен подсказывать модели отказывать.
+        invariant_instruction = ""
+        if self.invariants_enabled and self.invariants:
             inv_str = "\n".join([f"🔴 [ЗАКОН] {k}: {v}" for k, v in self.invariants.items()])
+            invariant_instruction = (
+                "=== АКТИВНЫЕ ИНВАРИАНТЫ ПОЛЬЗОВАТЕЛЯ ===\n"
+                f"{inv_str}\n"
+                "Если запрос прямо нарушает одно из перечисленных правил, кратко объясни конфликт и откажи. "
+                "Не отказывай по причинам, которых нет в этом списке.\n"
+                "==========================================\n"
+            )
 
         # 3. Извлекаем активный профиль персонализации
         profile = self.profiles.get(self.current_profile, {})
@@ -357,30 +394,24 @@ class SimpleAgent:
             )
 
         # 5. Собираем супер-приоритетный системный промпт
-        orchestration_instruction = (
-            "=== ИНСТРУКЦИЯ ПО МНОГОСЕРВЕРНОЙ ОРКЕСТРАЦИИ MCP ===\n"
-            "У тебя есть доступ к инструментам с нескольких MCP-серверов (Project Inspector, Git Manager, Scheduler, Pipeline, Document Indexer). "
-            "Если пользователь просит выполнить комплексную задачу (например, проиндексировать документы, сравнить стратегии chunking, найти информацию в RAG), "
-            "ты ДОЛЖЕН по очереди вызвать все необходимые инструменты в течение диалога, пока вся задача не будет полностью выполнена. "
-            "Не останавливайся на полпути, вызывай инструменты последовательно!\n"
-            "====================================================\n"
-        )
-
-        rag_instruction = (
-            "=== ИНСТРУКЦИЯ ПО RAG И ИНДЕКСАЦИИ ДОКУМЕНТОВ (День 21) ===\n"
-            "У тебя есть инструменты: `build_document_index`, `search_document_index`, `compare_chunking_strategies`.\n"
-            "- Если пользователь просит построить индекс документов -> вызови `build_document_index`.\n"
-            "- Если пользователь просит сравнить стратегии нарезки (Fixed Size vs Structural) -> вызови `compare_chunking_strategies`.\n"
-            "- Если пользователь ищет информацию в документах -> вызови `search_document_index`.\n"
-            "==========================================================\n"
-        )
+        if mcp_clients:
+            orchestration_instruction = (
+                "=== ИНСТРУКЦИЯ ПО МНОГОСЕРВЕРНОЙ ОРКЕСТРАЦИИ MCP ===\n"
+                "Вызывай только инструменты, переданные текущему запросу. Если нужного инструмента нет, не утверждай, что вызываешь его.\n"
+                "====================================================\n"
+            )
+            rag_instruction = (
+                "=== ИНСТРУКЦИЯ ПО RAG И ИНДЕКСАЦИИ ДОКУМЕНТОВ (День 21) ===\n"
+                "Инструменты индексации доступны только если они перечислены среди инструментов текущего запроса.\n"
+                "==========================================================\n"
+            )
+        else:
+            orchestration_instruction = ""
+            rag_instruction = ""
 
         sys_prompt_full = (
             f"{self.system_prompt}\n\n"
-            f"🛑🛑🛑 КРИТИЧЕСКИЕ СИСТЕМНЫЕ ИНВАРИАНТЫ 🛑🛑🛑\n"
-            f"{inv_str}\n"
-            "⚠️ Если запрос нарушает закон — пиши '❌ ОТКАЗ ВЫПОЛНЕНИЯ: Нарушение инварианта'.\n"
-            "🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑\n\n"
+            f"{invariant_instruction}\n"
             f"{orchestration_instruction}\n\n"
             f"{rag_instruction}\n\n"
             f"{tsm_rules}\n\n"
@@ -399,8 +430,34 @@ class SimpleAgent:
             wm_str = "\n".join([f"- {k}: {v}" for k, v in self.wm.items()])
             messages.append({"role": "system", "content": f"=== WORKING MEMORY (WM) ===\n{wm_str}"})
 
+        # RAG Context Retrieval (если режим RAG ВКЛЮЧЕН)
+        if self.rag_mode_enabled:
+            try:
+                from document_indexer import DocumentIndexer
+                indexer = DocumentIndexer()
+                matches = indexer.search(
+                    user_message,
+                    strategy="all",
+                    source_prefix=rag_source_prefix,
+                )
+                if matches:
+                    snippets = [f"📄 Источник [{m.get('source')} - {m.get('section')}]:\n{m.get('text')}" for m in matches[:3]]
+                    rag_context_str = (
+                        "=== RAG CONTEXT (Релевантные чанки из базы знаний проекта) ===\n"
+                        "Используй найденные фрагменты и сразу ответь на вопрос. Не объявляй о будущем поиске и не проси ждать.\n\n"
+                        + "\n\n".join(snippets)
+                    )
+                    messages.append({"role": "system", "content": rag_context_str})
+                    print(f"[{time.strftime('%H:%M:%S')}] [RAG ON] Injected {len(matches[:3])} chunks into prompt.")
+                else:
+                    print(f"[{time.strftime('%H:%M:%S')}] [RAG ON] No matching chunks found for query.")
+            except Exception as e:
+                print(f"[RAG Retrieval Error]: {e}")
+        else:
+            print(f"[{time.strftime('%H:%M:%S')}] [RAG OFF] Skipping retrieval context.")
+
         # Short-Term Memory (STM)
-        stm_history = self.history[:-1][-self.WINDOW_SIZE:]
+        stm_history = conversation_history[:-1][-self.WINDOW_SIZE:]
         messages += stm_history
         messages.append({"role": "user", "content": user_message})
 
@@ -515,7 +572,7 @@ class SimpleAgent:
                     else:
                         answer = choice_msg.get("content", "Пайплайн оркестрации завершен.")
 
-                    self.history.append({
+                    conversation_history.append({
                         "role": "assistant",
                         "content": answer,
                         "model": model_used,
@@ -523,8 +580,9 @@ class SimpleAgent:
                         "usage": usage
                     })
 
-                    self._route_memory(user_message, answer)
-                    self._save_state()
+                    if persist_state:
+                        self._route_memory(user_message, answer)
+                        self._save_state()
 
                     return {
                         "role": "assistant",
@@ -589,6 +647,9 @@ class SimpleAgent:
                 "top_p": self.top_p,
                 "top_k": self.top_k,
                 "context_compression": self.context_compression,
+                "planning_mode_enabled": self.planning_mode_enabled,
+                "rag_mode_enabled": self.rag_mode_enabled,
+                "invariants_enabled": self.invariants_enabled,
             },
             "stats": self.get_token_stats()
         }

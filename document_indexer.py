@@ -193,7 +193,12 @@ class DocumentIndexer:
         INDEX_FILE.write_text(json.dumps(index_data, ensure_ascii=False, indent=2), encoding="utf-8")
         return index_data
 
-    def search(self, query: str, strategy: str = "all") -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        strategy: str = "all",
+        source_prefix: str | None = None,
+    ) -> List[Dict[str, Any]]:
         """Семантический/текстовый поиск по индексу с учетом стратегии."""
         if not INDEX_FILE.exists():
             self.build_index()
@@ -209,6 +214,8 @@ class DocumentIndexer:
 
         for c in all_chunks:
             if strategy != "all" and c.get("strategy") != strategy:
+                continue
+            if source_prefix and not c.get("source", "").startswith(source_prefix):
                 continue
             text_lower = c["text"].lower()
             # Простейший подсчет совпадений слов (TF-IDF симуляция)
