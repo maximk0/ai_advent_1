@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from simple_agent import SimpleAgent
+from simple_agent import SimpleAgent, answer_without_rag_evidence, format_rag_evidence
 from chat_ui import get_chat_page
 from mcp_client import MCPClient
 
@@ -56,7 +56,35 @@ def _answer_text(result) -> str:
         return str(result)
     if result.get("error"):
         return f"Ошибка модели: {result['error']}"
-    return result.get("content") or "Модель не вернула текстовый ответ."
+    answer = result.get("content") or "Модель не вернула текстовый ответ."
+    evidence = result.get("rag_evidence")
+    return f"{answer.rstrip()}\n\n{evidence}" if evidence else answer
+
+
+def _audit_rag_answer(answer: str, chunks: list[dict], criteria: list[dict]) -> dict:
+    """Audit evidence presence and heuristic support for expected answer facts."""
+    evidence = format_rag_evidence(chunks)
+    answer_core = answer_without_rag_evidence(answer)
+    cited_chunks = bool(chunks) and bool(evidence) and evidence in answer
+    quote_text = " ".join(str(chunk.get("text", "")) for chunk in chunks).casefold()
+    answer_text = answer_core.casefold()
+    supported, unsupported = [], []
+    for item in criteria:
+        terms = item.get("any_terms", [])
+        label = item.get("label", "Критерий")
+        stated = any(str(term).casefold() in answer_text for term in terms)
+        quote_support = any(str(term).casefold() in quote_text for term in terms)
+        if stated:
+            (supported if quote_support else unsupported).append(label)
+    return {
+        "sources_present": bool(chunks) and cited_chunks,
+        "quotes_present": bool(chunks) and cited_chunks,
+        "cited_chunk_count": len(chunks) if cited_chunks else 0,
+        "expected_facts_supported": supported,
+        "expected_facts_unsupported": unsupported,
+        "meaning_supported": bool(chunks) and cited_chunks and bool(supported) and not unsupported,
+        "meaning_check_note": "эвристика: проверяются контрольные факты, а не полное понимание смысла",
+    }
 
 
 def _comparison_agent(base_agent: SimpleAgent, rag_enabled: bool) -> SimpleAgent:
@@ -64,6 +92,12 @@ def _comparison_agent(base_agent: SimpleAgent, rag_enabled: bool) -> SimpleAgent
     trial_agent = copy.deepcopy(base_agent)
     trial_agent.rag_mode_enabled = rag_enabled
     trial_agent.planning_mode_enabled = False
+    if not rag_enabled:
+        # A fair no-RAG baseline must not inherit facts learned from earlier
+        # document answers through chat history, working memory, or LTM.
+        trial_agent.ltm = {}
+        trial_agent.wm = {}
+        trial_agent.summary_context = ""
     trial_agent.system_prompt = (
         f"{base_agent.system_prompt}\n\n"
         "Для этого сравнения сразу дай законченный ответ на вопрос пользователя. "
@@ -135,7 +169,8 @@ def _run_rag_evaluation(job_id: str, questions: list, base_agent: SimpleAgent) -
                     answer = f"Ошибка модели: {exc}"
                 pair[mode] = {
                     "answer": answer,
-                    "score": _score_answer(answer, criteria),
+                    "score": _score_answer(answer_without_rag_evidence(answer), criteria),
+                    **({"citation_audit": _audit_rag_answer(answer, chunks, criteria)} if rag_enabled else {}),
                 }
 
             baseline_sources = list(dict.fromkeys(
@@ -173,8 +208,14 @@ def _run_rag_evaluation(job_id: str, questions: list, base_agent: SimpleAgent) -
         expected_source_total = sum(len(r["expected_sources"]) for r in results)
         baseline_source_hits = sum(len(r["baseline_matched_sources"]) for r in results)
         filtered_source_hits = sum(len(r["filtered_matched_sources"]) for r in results)
+        baseline_sources_present = sum(bool(r["baseline"]["citation_audit"]["sources_present"]) for r in results)
+        filtered_sources_present = sum(bool(r["filtered"]["citation_audit"]["sources_present"]) for r in results)
+        baseline_quotes_present = sum(bool(r["baseline"]["citation_audit"]["quotes_present"]) for r in results)
+        filtered_quotes_present = sum(bool(r["filtered"]["citation_audit"]["quotes_present"]) for r in results)
+        baseline_meaning_supported = sum(bool(r["baseline"]["citation_audit"]["meaning_supported"]) for r in results)
+        filtered_meaning_supported = sum(bool(r["filtered"]["citation_audit"]["meaning_supported"]) for r in results)
         report = [
-            "ОТЧЁТ: RAG БЕЗ ФИЛЬТРА И С РЕРАНКИНГОМ",
+            "ОТЧЁТ: RAG — ЦИТАТЫ, ИСТОЧНИКИ И ПРОВЕРКА ОЖИДАЕМЫХ ФАКТОВ",
             f"Вопросов обработано: {len(results)} из {total}",
             f"Настройки улучшенного поиска: K до={base_agent.rag_top_k_before}, K после={base_agent.rag_top_k_after}, similarity ≥ {base_agent.rag_similarity_threshold:.2f}, query rewrite={'включён' if base_agent.rag_query_rewrite_enabled else 'выключен'}.",
             "Качество ответов — доля совпавших контрольных признаков из evaluation_criteria; это ориентир, а не семантический судья.",
@@ -182,6 +223,9 @@ def _run_rag_evaluation(job_id: str, questions: list, base_agent: SimpleAgent) -
             f"RAG без фильтра/переписывания: {baseline_passed}/{baseline_total} признаков ({round(baseline_passed * 100 / baseline_total) if baseline_total else 0}%).",
             f"RAG с query rewrite и фильтром: {filtered_passed}/{filtered_total} признаков ({round(filtered_passed * 100 / filtered_total) if filtered_total else 0}%).",
             f"Ожидаемые источники найдены: без фильтра {baseline_source_hits}/{expected_source_total}; с фильтром {filtered_source_hits}/{expected_source_total}.",
+            f"RAG без фильтра: источники есть в {baseline_sources_present}/{total}, цитаты есть в {baseline_quotes_present}/{total}; контрольные факты согласованы с цитатами в {baseline_meaning_supported}/{total} ответах.",
+            f"RAG с фильтром: источники есть в {filtered_sources_present}/{total}, цитаты есть в {filtered_quotes_present}/{total}; контрольные факты согласованы с цитатами в {filtered_meaning_supported}/{total} ответах.",
+            "Проверка смысла автоматическая и эвристическая: для контрольных признаков проверяется, что факт, присутствующий в ответе, также встречается в найденных цитатах. Это не замена ручной смысловой оценке.",
             "",
         ]
         for index, item in enumerate(results, 1):
@@ -202,9 +246,11 @@ def _run_rag_evaluation(job_id: str, questions: list, base_agent: SimpleAgent) -
                 f"RAG без фильтра — признаки: {baseline['score']['passed']}/{baseline['score']['total']} ({baseline['score']['percent'] if baseline['score']['percent'] is not None else 0}%)",
                 f"RAG без фильтра — не найдены: {', '.join(baseline['score']['missing']) or 'все признаки найдены'}",
                 f"Ответ RAG без фильтра: {baseline['answer']}",
+                f"Проверка источников/цитат без фильтра: источники {'есть' if baseline['citation_audit']['sources_present'] else 'нет'}, цитаты {'есть' if baseline['citation_audit']['quotes_present'] else 'нет'}; контрольные факты без поддержки: {', '.join(baseline['citation_audit']['expected_facts_unsupported']) or 'нет'}",
                 f"RAG с фильтром — признаки: {filtered['score']['passed']}/{filtered['score']['total']} ({filtered['score']['percent'] if filtered['score']['percent'] is not None else 0}%)",
                 f"RAG с фильтром — не найдены: {', '.join(filtered['score']['missing']) or 'все признаки найдены'}",
                 f"Ответ RAG с фильтром: {filtered['answer']}",
+                f"Проверка источников/цитат с фильтром: источники {'есть' if filtered['citation_audit']['sources_present'] else 'нет'}, цитаты {'есть' if filtered['citation_audit']['quotes_present'] else 'нет'}; контрольные факты без поддержки: {', '.join(filtered['citation_audit']['expected_facts_unsupported']) or 'нет'}",
                 "",
             ])
         _update_evaluation(job_id, status="complete", report="\n".join(report), results=results.copy())
@@ -237,6 +283,7 @@ def _run_rag_comparison(
             return [{
             "source": match.get("source", "неизвестный источник"),
             "section": match.get("section", ""),
+            "chunk_id": match.get("chunk_id", "не указан"),
             "text": match.get("text", "")[:900],
             "similarity": match.get("similarity"),
             "search_score": match.get("search_score"),
@@ -482,7 +529,7 @@ SIDEBAR_STATS_HTML = """
   <div id="ragSettingsControls" style="display: none; flex-direction: column; gap: 8px; padding: 9px; background: rgba(0,0,0,.2); border: 1px solid var(--border); border-radius: 7px;">
     <label class="checkbox-group" style="margin: 0; cursor: pointer; color: #fda4af; font-size: 0.75rem; display: flex; align-items: center; gap: 6px;">
       <input type="checkbox" id="rag_mode_enabled" checked onchange="toggleRagMode(this.checked)">
-      <b>Добавлять RAG-контекст в чат</b>
+      <b>Включить поиск по документам (RAG)</b>
     </label>
     <label class="checkbox-group" style="margin: 0; cursor: pointer; color: var(--text-dim); font-size: 0.75rem; display: flex; align-items: center; gap: 6px;">
       <input type="checkbox" id="ragRewriteEnabled" checked>
@@ -497,7 +544,7 @@ SIDEBAR_STATS_HTML = """
     <label style="font-size:.72rem; color:var(--text-dim);">Top-K фрагментов после фильтра
       <input id="ragTopKAfter" type="number" min="1" max="20" value="3" class="input-field" style="font-size:.75rem; padding:5px; height:auto;">
     </label>
-    <span style="font-size:.67rem; line-height:1.4; color:var(--text-dim);">Сначала поиск выбирает до K кандидатов. Порог similarity отбрасывает слабые совпадения, затем Top-K ограничивает число фрагментов для модели. Переписывание выполняет локальная эвристика: нормализует слова и добавляет заданные синонимы; отдельная модель для него не вызывается. Настройки действуют в чате и в улучшенном варианте сравнения.</span>
+    <span style="font-size:.67rem; line-height:1.4; color:var(--text-dim);">При выключенном RAG поиск по документам и индексатор не используются, но сохранённая память и контекст текущего чата остаются доступны. Кнопка «Очистить историю чата» очищает только переписку; для чистого сравнения сбросьте все данные памяти. Сначала поиск выбирает до K кандидатов. Порог similarity отбрасывает слабые совпадения, затем Top-K ограничивает число фрагментов для модели. Переписывание выполняет локальная эвристика; настройки действуют в чате и сравнении.</span>
   </div>
 </div>
 
@@ -534,15 +581,15 @@ SIDEBAR_STATS_HTML = """
 
 COMPARISON_VIEW_HTML = """
 <nav class="main-tabs" aria-label="Режимы приложения">
-  <button id="chatTab" class="main-tab" type="button" onclick="showAppView('chat')">Чат</button>
-  <button id="comparisonTab" class="main-tab active" type="button" onclick="showAppView('comparison')">Сравнение</button>
+  <button id="chatTab" class="main-tab active" type="button" onclick="showAppView('chat')">Чат</button>
+  <button id="comparisonTab" class="main-tab" type="button" onclick="showAppView('comparison')">Сравнение</button>
 </nav>
 <section id="comparisonView" aria-labelledby="comparisonTitle">
   <div class="compare-page">
     <header class="compare-header">
       <div>
         <h1 id="comparisonTitle">Сравнение ответов</h1>
-        <p>Сравните исходный поиск с переписанным запросом и фильтром релевантности. Настройки модели берутся из сайдбара.</p>
+        <p>Сравните ответы с RAG и без него. Для ответа с RAG показываются источник, раздел, chunk ID и точная цитата; контрольный прогон проверяет их наличие и поддержку ожидаемых фактов.</p>
       </div>
       <button id="runBenchmarkBtn" class="benchmark-btn" type="button" onclick="runRagEvaluation(this)">Запустить все 10 вопросов</button>
     </header>
@@ -573,8 +620,8 @@ COMPARISON_VIEW_HTML = """
         <div><h2>Сравниваем ответы</h2><p>Не закрывайте эту вкладку, пока идёт обработка.</p></div>
         <ol class="stage-list">
           <li data-stage="retrieval">Переписывается запрос и отбираются фрагменты</li>
-          <li data-stage="baseline_answer">Генерируется ответ без фильтра</li>
-          <li data-stage="filtered_answer">Генерируется ответ с фильтром</li>
+          <li data-stage="baseline_answer">Генерируется ответ с источниками и цитатами без фильтра</li>
+          <li data-stage="filtered_answer">Генерируется ответ с источниками и цитатами после фильтра</li>
           <li data-stage="plain_answer">Генерируется ответ без RAG</li>
           <li data-stage="summary">Генерируется саммари ответов</li>
         </ol>
@@ -595,7 +642,7 @@ COMPARISON_VIEW_HTML = """
             <div id="baselineAnswer" class="answer-content markdown-content"></div>
           </section>
           <section class="answer-card filtered-answer-card">
-            <h3>RAG с query rewrite и фильтром</h3>
+            <h3>RAG с query rewrite, фильтром и цитатами</h3>
             <div id="filteredAnswer" class="answer-content markdown-content"></div>
           </section>
           <section class="answer-card plain-answer-card">
@@ -816,17 +863,20 @@ async function refreshUI() {
         if (state.history && state.history.length > 0) {
             state.history.forEach(m => {
                 const isBot = m.role === 'assistant';
-                addMessage(isBot ? 'bot' : 'user', m.content, isBot ? {model: m.model, time: m.time, usage: m.usage} : null);
+                addMessage(isBot ? 'bot' : 'user', m.content, isBot ? {model: m.model, time: m.time, usage: m.usage, rag_evidence: m.rag_evidence} : null);
             });
         } else {
-            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! Это RAG с переписыванием запроса и фильтром релевантности (День 23). Настрой порог и Top-K во вкладке «Сравнение».</div></div>';
+            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! RAG отвечает по найденным документам и показывает источники с точными цитатами. Если подходящих фрагментов нет, я скажу об этом и попрошу уточнить запрос.</div></div>';
         }
 
         if (state.stats) {
             document.getElementById('statTotal').textContent = state.stats.total_tokens || 0;
             document.getElementById('statCost').textContent = '$' + (state.stats.cost || 0).toFixed(6);
         }
-        if (!window.currentAppView) showAppView('comparison');
+        if (!window.currentAppView) {
+            const savedView = localStorage.getItem('day24-active-view');
+            showAppView(savedView === 'comparison' ? 'comparison' : 'chat');
+        }
         await loadComparisonQuestions();
     } catch (e) { console.error(e); }
 }
@@ -874,6 +924,7 @@ function showAppView(view) {
     document.getElementById('chatTab').classList.toggle('active', !isComparison);
     document.getElementById('comparisonTab').classList.toggle('active', isComparison);
     window.currentAppView = view;
+    localStorage.setItem('day24-active-view', isComparison ? 'comparison' : 'chat');
 }
 
 async function loadComparisonQuestions() {
@@ -1000,7 +1051,7 @@ function renderComparison(result) {
             const score = snippet.similarity == null
                 ? `совпадений: ${snippet.search_score ?? 0}`
                 : `similarity: ${Number(snippet.similarity).toFixed(2)}`;
-            source.textContent = `${snippet.source || 'Источник'}${snippet.section ? ` — ${snippet.section}` : ''} (${score}; слова: ${(snippet.matched_terms || []).join(', ') || '—'})`;
+            source.textContent = `${snippet.source || 'Источник'}${snippet.section ? ` — ${snippet.section}` : ''} [${snippet.chunk_id || 'chunk неизвестен'}] (${score}; слова: ${(snippet.matched_terms || []).join(', ') || '—'})`;
             const text = document.createElement('span');
             text.textContent = snippet.text || '';
             block.append(source, text);
@@ -1075,7 +1126,7 @@ async function waitForRagJob(startData, onProgress) {
 async function runRagEvaluation(button) {
     const resultEl = document.getElementById('benchmarkResult');
     resultEl.hidden = false;
-    resultEl.textContent = 'Подготовка оценки: сравниваются RAG без фильтра, RAG с фильтром и ответ без RAG…';
+    resultEl.textContent = 'Проверка 10 вопросов: сравниваются факты в ответах, наличие источников и цитат, а также их соответствие контрольным ожиданиям…';
     setComparisonBusy(true);
 
     try {
@@ -1087,7 +1138,7 @@ async function runRagEvaluation(button) {
         const startData = await startRes.json();
         if (!startRes.ok || startData.error) throw new Error(startData.error || 'Не удалось запустить оценку');
         const result = await waitForRagJob(startData, job => {
-            resultEl.textContent = `Выполнено вопросов: ${job.completed || 0}/${job.total || 10}. Сравнивается качество retrieval и ответов…`;
+            resultEl.textContent = `Выполнено вопросов: ${job.completed || 0}/${job.total || 10}. Проверяются ответы, источники и цитаты…`;
         });
         if (result.status === 'complete' && result.report) {
             resultEl.textContent = result.report;
@@ -1318,7 +1369,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         page_html = get_chat_page(
-            title="RAG Query Rewrite & Reranking — День 23",
+            title="RAG — Цитаты и анти-галлюцинации — День 24",
             extra_sidebar_html=SIDEBAR_STATS_HTML,
             extra_scripts=EXTRA_SCRIPTS,
             extra_main_html=COMPARISON_VIEW_HTML,
@@ -1338,9 +1389,12 @@ class Handler(BaseHTTPRequestHandler):
                 user_msg = data.get("message", "")
                 with _LOCK:
                     agent.set_config(data.get("config", {}))
+                    available_clients = [pipeline_client, scheduler_client, git_client]
+                    if agent.rag_mode_enabled:
+                        available_clients.insert(0, indexer_client)
                     result = agent.chat(
                         user_msg,
-                        mcp_clients=[indexer_client, pipeline_client, scheduler_client, git_client],
+                        mcp_clients=available_clients,
                         rag_source_prefix="docs/",
                     )
                 self._send_json(result)
@@ -1511,7 +1565,7 @@ def load_env() -> None:
 
 if __name__ == "__main__":
     load_env()
-    print(f"🚀 День 23 RAG Reranking Agent & Sidebar: http://127.0.0.1:{PORT}")
+    print(f"🚀 День 24 RAG Citations & Anti-Hallucination: http://127.0.0.1:{PORT}")
     class ReusableThreadingHTTPServer(ThreadingHTTPServer):
         allow_reuse_address = True
     try:

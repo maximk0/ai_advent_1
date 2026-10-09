@@ -147,6 +147,31 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
     }
     .msg-user .msg-meta { justify-content: flex-end; }
 
+    .rag-evidence-card {
+      margin-top: 10px;
+      padding: 12px 15px;
+      border: 1px solid rgba(52, 211, 153, 0.35);
+      border-left: 3px solid #34d399;
+      border-radius: 10px;
+      background: rgba(16, 185, 129, 0.07);
+      color: var(--text-dim);
+      font-size: 0.84rem;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+    }
+    .rag-evidence-card summary {
+      margin-bottom: 7px;
+      color: #6ee7b7;
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: .02em;
+      cursor: pointer;
+      user-select: none;
+    }
+    .rag-evidence-content { padding-top: 5px; }
+    .rag-evidence-card p { margin: 0 0 7px; }
+    .rag-evidence-card p:last-child { margin-bottom: 0; }
+
     /* Input Area */
     .input-container {
       padding: 20px;
@@ -439,6 +464,16 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
       const wrapper = document.createElement('div');
       wrapper.className = `msg-wrapper msg-${role === 'user' ? 'user' : 'bot'}`;
 
+      let evidence = meta?.rag_evidence || '';
+      if (role !== 'user' && !evidence && typeof content === 'string') {
+        const legacyEvidenceMarker = '\\n### Источники и цитаты';
+        const markerIndex = content.indexOf(legacyEvidenceMarker);
+        if (markerIndex >= 0) {
+          evidence = content.slice(markerIndex + 1);
+          content = content.slice(0, markerIndex).trimEnd();
+        }
+      }
+
       const bubble = document.createElement('div');
       bubble.className = 'msg-bubble';
 
@@ -449,6 +484,19 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
       }
 
       wrapper.appendChild(bubble);
+
+      if (evidence) {
+        const evidenceCard = document.createElement('details');
+        evidenceCard.className = 'rag-evidence-card';
+        evidenceCard.setAttribute('aria-label', 'Источники и цитаты, добавленные приложением');
+        const evidenceTitle = document.createElement('summary');
+        evidenceTitle.textContent = '📚 Источники и цитаты · добавлены приложением';
+        const evidenceContent = document.createElement('div');
+        evidenceContent.className = 'rag-evidence-content';
+        evidenceContent.innerHTML = marked.parse(String(evidence).replace(/^### Источники и цитаты\\s*/, ''));
+        evidenceCard.append(evidenceTitle, evidenceContent);
+        wrapper.appendChild(evidenceCard);
+      }
 
       if (meta) {
         const metaDiv = document.createElement('div');
@@ -521,7 +569,8 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
           addMessage('bot', data.content, {
               model: data.model,
               time: data.time,
-              usage: data.usage
+              usage: data.usage,
+              rag_evidence: data.rag_evidence
           });
           if (typeof updateStats === 'function') updateStats(data.stats);
         }
@@ -609,7 +658,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
           chatLog.innerHTML = '';
           state.history.forEach(m => {
             const isBot = m.role === 'assistant';
-            const meta = (isBot && m.model) ? { model: m.model, time: m.time, usage: m.usage } : null;
+            const meta = (isBot && m.model) ? { model: m.model, time: m.time, usage: m.usage, rag_evidence: m.rag_evidence } : null;
             addMessage(isBot ? 'bot' : 'user', m.content, meta);
           });
         }

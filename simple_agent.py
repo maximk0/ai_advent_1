@@ -4,6 +4,47 @@ import time
 import urllib.request
 import urllib.error
 
+
+def _quote_from_chunk(chunk: dict, max_chars: int = 360) -> str:
+    """Return a verbatim, compact excerpt from a retrieved chunk."""
+    text = str(chunk.get("text", "")).strip()
+    if len(text) <= max_chars:
+        return text
+    positions = [text.casefold().find(str(term).casefold()) for term in chunk.get("matched_terms", []) if term]
+    positions = [position for position in positions if position >= 0]
+    start = max(0, (min(positions) if positions else 0) - max_chars // 4)
+    end = min(len(text), start + max_chars)
+    if end < len(text):
+        boundary = text.rfind(" ", start, end)
+        if boundary > start + max_chars // 2:
+            end = boundary
+    return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
+
+
+def format_rag_evidence(chunks: list[dict]) -> str:
+    """Append source metadata and exact excerpts for chunks supplied to the model."""
+    if not chunks:
+        return ""
+    lines = ["### Источники и цитаты"]
+    seen = set()
+    for chunk in chunks:
+        chunk_id = str(chunk.get("chunk_id") or "не указан")
+        key = (chunk.get("source"), chunk.get("section"), chunk_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.extend([
+            f"- **Источник:** `{chunk.get('source', 'неизвестный источник')}`; "
+            f"**раздел:** {chunk.get('section') or 'не указан'}; **chunk_id:** `{chunk_id}`",
+            f"  **Цитата:** «{_quote_from_chunk(chunk)}»",
+        ])
+    return "\n".join(lines)
+
+
+def answer_without_rag_evidence(answer: str) -> str:
+    """Remove the generated evidence appendix before scoring answer facts."""
+    return str(answer or "").split("\n### Источники и цитаты", 1)[0].strip()
+
 LEGACY_DEFAULT_INVARIANTS = {
     "Архитектура": "Strict MVI (Model-View-Intent) с однонаправленным потоком данных (UDF). Любые сайд-эффекты оборачивать в News/Effects.",
     "Стек проекта": "Только чистый Kotlin, Jetpack Compose для UI и Koin для Dependency Injection. Использование Java или устаревших XML Layouts КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО.",
@@ -466,6 +507,7 @@ class SimpleAgent:
             messages.append({"role": "system", "content": f"=== WORKING MEMORY (WM) ===\n{wm_str}"})
 
         # RAG Context Retrieval (если режим RAG ВКЛЮЧЕН)
+        rag_evidence_chunks = []
         if self.rag_mode_enabled:
             try:
                 from document_indexer import DocumentIndexer
@@ -481,6 +523,7 @@ class SimpleAgent:
                         query_rewrite_enabled=self.rag_query_rewrite_enabled,
                     )
                     matches = retrieval["filtered_results"]
+                rag_evidence_chunks = list(matches[:self.rag_top_k_after])
                 if matches:
                     snippets = []
                     for match in matches[:self.rag_top_k_after]:
@@ -490,12 +533,16 @@ class SimpleAgent:
                             else f"совпало терминов {match.get('search_score', 0)}"
                         )
                         snippets.append(
-                            f"📄 Источник [{match.get('source')} — {match.get('section')}]; "
+                            f"📄 Источник [{match.get('source')} — {match.get('section')}; "
+                            f"chunk_id={match.get('chunk_id', 'не указан')}]; "
                             f"{relevance}:\n{match.get('text')}"
                         )
                     rag_context_str = (
                         "=== RAG CONTEXT (Релевантные чанки из базы знаний проекта) ===\n"
-                        "Используй найденные фрагменты и сразу ответь на вопрос. Не объявляй о будущем поиске и не проси ждать.\n\n"
+                        "Отвечай только фактами, подтверждёнными этими фрагментами; не используй внешние знания и не додумывай. "
+                        "Для каждого важного факта укажи в тексте ссылку вида [chunk_id]. Если фрагменты не отвечают на вопрос, "
+                        "скажи «Не знаю по найденным документам» и попроси уточнить запрос. Сразу дай законченный ответ, "
+                        "не объявляй о будущем поиске и не проси ждать.\n\n"
                         + "\n\n".join(snippets)
                     )
                     messages.append({"role": "system", "content": rag_context_str})
@@ -504,8 +551,28 @@ class SimpleAgent:
                     print(f"[{time.strftime('%H:%M:%S')}] [RAG ON] No chunks passed the relevance filter.")
             except Exception as e:
                 print(f"[RAG Retrieval Error]: {e}")
+                matches = []
         else:
             print(f"[{time.strftime('%H:%M:%S')}] [RAG OFF] Skipping retrieval context.")
+
+        # При включённом RAG пустая выборка означает, что все результаты
+        # отсутствуют или ниже порога. Не отправляем вопрос в модель без контекста.
+        if self.rag_mode_enabled and not rag_evidence_chunks:
+            answer = (
+                "Не знаю по найденным документам: релевантных фрагментов выше порога "
+                f"{self.rag_similarity_threshold:.2f} не найдено. Уточните вопрос или проверьте базу знаний."
+            )
+            conversation_history.append({"role": "assistant", "content": answer, "model": self.model})
+            if persist_state:
+                self._save_state()
+            return {
+                "role": "assistant",
+                "content": answer,
+                "model": self.model,
+                "time": 0,
+                "usage": {},
+                "stats": self.get_token_stats(),
+            }
 
         # Short-Term Memory (STM)
         stm_history = conversation_history[:-1][-self.WINDOW_SIZE:]
@@ -623,9 +690,15 @@ class SimpleAgent:
                     else:
                         answer = choice_msg.get("content", "Пайплайн оркестрации завершен.")
 
+                    if self.rag_mode_enabled and rag_evidence_chunks:
+                        rag_evidence = format_rag_evidence(rag_evidence_chunks)
+                    else:
+                        rag_evidence = ""
+
                     conversation_history.append({
                         "role": "assistant",
                         "content": answer,
+                        "rag_evidence": rag_evidence,
                         "model": model_used,
                         "time": exec_time,
                         "usage": usage
@@ -638,6 +711,7 @@ class SimpleAgent:
                     return {
                         "role": "assistant",
                         "content": answer,
+                        "rag_evidence": rag_evidence,
                         "model": model_used,
                         "time": exec_time,
                         "usage": usage,

@@ -1,5 +1,5 @@
 {
-  "evaluation_suite": "AI Advent Day 23 - RAG query rewrite and reranking: fictional greenhouse Sova-17",
+  "evaluation_suite": "AI Advent Day 24 - RAG citations and anti-hallucination: fictional greenhouse Sova-17",
   "total_questions": 10,
   "questions": [
     {
