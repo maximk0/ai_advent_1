@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """День 22: Первый RAG-запрос (Сравнение режимов с RAG и без RAG + 10 контрольных вопросов)
-   Полная интеграция RAG-пайплайна, переключатель режимов RAG ON/OFF,
+   Полная интеграция RAG-пайплайна, query rewriting и фильтрация релевантности,
    сохранение 100% сайдбара прошлых дней.
 """
 
@@ -93,16 +93,31 @@ def _run_rag_evaluation(job_id: str, questions: list, base_agent: SimpleAgent) -
             criteria = question_data.get("evaluation_criteria", [])
             expected_sources = question_data.get("source_files", [])
             try:
-                matches = indexer.search(question, strategy="all", source_prefix="docs/")
-                retrieved_sources = list(dict.fromkeys(m.get("source", "") for m in matches[:3] if m.get("source")))
+                retrieval = indexer.compare_retrieval(
+                    question,
+                    source_prefix="docs/",
+                    top_k_before=base_agent.rag_top_k_before,
+                    top_k_after=base_agent.rag_top_k_after,
+                    similarity_threshold=base_agent.rag_similarity_threshold,
+                    query_rewrite_enabled=base_agent.rag_query_rewrite_enabled,
+                )
                 retrieval_error = None
             except Exception as exc:
-                matches = []
-                retrieved_sources = []
+                retrieval = {
+                    "baseline_results": [], "filtered_results": [], "candidates_before_filter": [],
+                    "rewritten_query": question, "top_k_before": base_agent.rag_top_k_before,
+                    "top_k_after": base_agent.rag_top_k_after, "passed_threshold_count": 0,
+                    "dropped_by_threshold_count": 0, "trimmed_by_top_k_count": 0,
+                }
                 retrieval_error = str(exc)
 
             pair = {"id": question_data.get("id", f"q{index}"), "question": question}
-            for mode, rag_enabled in (("without_rag", False), ("with_rag", True)):
+            modes = (
+                ("without_rag", False, []),
+                ("baseline", True, retrieval["baseline_results"]),
+                ("filtered", True, retrieval["filtered_results"]),
+            )
+            for mode, rag_enabled, chunks in modes:
                 # Each answer gets a pristine conversation and a copy of the
                 # current agent configuration; evaluation must not pollute chat.
                 trial_agent = _comparison_agent(base_agent, rag_enabled)
@@ -113,6 +128,7 @@ def _run_rag_evaluation(job_id: str, questions: list, base_agent: SimpleAgent) -
                         history=[],
                         persist_state=False,
                         rag_source_prefix="docs/",
+                        rag_chunks=chunks if rag_enabled else None,
                     )
                     answer = _answer_text(result)
                 except Exception as exc:
@@ -122,44 +138,73 @@ def _run_rag_evaluation(job_id: str, questions: list, base_agent: SimpleAgent) -
                     "score": _score_answer(answer, criteria),
                 }
 
-            found_sources = [source for source in expected_sources if source in retrieved_sources]
+            baseline_sources = list(dict.fromkeys(
+                item.get("source", "") for item in retrieval["baseline_results"] if item.get("source")
+            ))
+            filtered_sources = list(dict.fromkeys(
+                item.get("source", "") for item in retrieval["filtered_results"] if item.get("source")
+            ))
+            baseline_found = [source for source in expected_sources if source in baseline_sources]
+            filtered_found = [source for source in expected_sources if source in filtered_sources]
             pair.update({
                 "expected": question_data.get("expected_expectation", ""),
                 "expected_sources": expected_sources,
-                "retrieved_sources": retrieved_sources,
-                "matched_sources": found_sources,
+                "baseline_sources": baseline_sources,
+                "filtered_sources": filtered_sources,
+                "baseline_matched_sources": baseline_found,
+                "filtered_matched_sources": filtered_found,
+                "candidates_before_count": len(retrieval["candidates_before_filter"]),
+                "passed_threshold_count": retrieval["passed_threshold_count"],
+                "dropped_by_threshold_count": retrieval["dropped_by_threshold_count"],
+                "trimmed_by_top_k_count": retrieval["trimmed_by_top_k_count"],
+                "candidates_after_count": len(retrieval["filtered_results"]),
+                "rewritten_query": retrieval["rewritten_query"],
                 "retrieval_error": retrieval_error,
             })
             results.append(pair)
             _update_evaluation(job_id, completed=index, results=results.copy())
 
-        rag_passed = sum(r["with_rag"]["score"]["passed"] for r in results)
-        rag_total = sum(r["with_rag"]["score"]["total"] for r in results)
+        filtered_passed = sum(r["filtered"]["score"]["passed"] for r in results)
+        filtered_total = sum(r["filtered"]["score"]["total"] for r in results)
+        baseline_passed = sum(r["baseline"]["score"]["passed"] for r in results)
+        baseline_total = sum(r["baseline"]["score"]["total"] for r in results)
         no_rag_passed = sum(r["without_rag"]["score"]["passed"] for r in results)
         no_rag_total = sum(r["without_rag"]["score"]["total"] for r in results)
+        expected_source_total = sum(len(r["expected_sources"]) for r in results)
+        baseline_source_hits = sum(len(r["baseline_matched_sources"]) for r in results)
+        filtered_source_hits = sum(len(r["filtered_matched_sources"]) for r in results)
         report = [
-            "ОТЧЁТ: СРАВНЕНИЕ RAG ON / OFF",
+            "ОТЧЁТ: RAG БЕЗ ФИЛЬТРА И С РЕРАНКИНГОМ",
             f"Вопросов обработано: {len(results)} из {total}",
-            "Оценка — доля совпавших контрольных признаков из evaluation_criteria; это ориентир по ключевым понятиям, не семантический судья.",
+            f"Настройки улучшенного поиска: K до={base_agent.rag_top_k_before}, K после={base_agent.rag_top_k_after}, similarity ≥ {base_agent.rag_similarity_threshold:.2f}, query rewrite={'включён' if base_agent.rag_query_rewrite_enabled else 'выключен'}.",
+            "Качество ответов — доля совпавших контрольных признаков из evaluation_criteria; это ориентир, а не семантический судья.",
             f"Без RAG: {no_rag_passed}/{no_rag_total} признаков ({round(no_rag_passed * 100 / no_rag_total) if no_rag_total else 0}%).",
-            f"С RAG: {rag_passed}/{rag_total} признаков ({round(rag_passed * 100 / rag_total) if rag_total else 0}%).",
+            f"RAG без фильтра/переписывания: {baseline_passed}/{baseline_total} признаков ({round(baseline_passed * 100 / baseline_total) if baseline_total else 0}%).",
+            f"RAG с query rewrite и фильтром: {filtered_passed}/{filtered_total} признаков ({round(filtered_passed * 100 / filtered_total) if filtered_total else 0}%).",
+            f"Ожидаемые источники найдены: без фильтра {baseline_source_hits}/{expected_source_total}; с фильтром {filtered_source_hits}/{expected_source_total}.",
             "",
         ]
         for index, item in enumerate(results, 1):
             off = item["without_rag"]
-            on = item["with_rag"]
+            baseline = item["baseline"]
+            filtered = item["filtered"]
             report.extend([
                 f"Вопрос {index}: {item['question']}",
                 f"Ожидание: {item['expected']}",
                 f"Ожидаемые источники: {', '.join(item['expected_sources']) or 'не заданы'}",
-                f"Источники, найденные RAG: {', '.join(item['retrieved_sources']) or 'не найдены'}",
-                f"Совпадение источника: {len(item['matched_sources'])}/{len(item['expected_sources'])}",
+                f"Переписанный запрос: {item['rewritten_query']}",
+                f"Кандидатов: {item['candidates_before_count']}; выше порога: {item['passed_threshold_count']}; отсечено порогом: {item['dropped_by_threshold_count']}; ограничено Top-K: {item['trimmed_by_top_k_count']}; финально: {item['candidates_after_count']}",
+                f"Источники без фильтра: {', '.join(item['baseline_sources']) or 'не найдены'}; совпадение {len(item['baseline_matched_sources'])}/{len(item['expected_sources'])}",
+                f"Источники с фильтром: {', '.join(item['filtered_sources']) or 'не найдены'}; совпадение {len(item['filtered_matched_sources'])}/{len(item['expected_sources'])}",
                 f"Без RAG — признаки: {off['score']['passed']}/{off['score']['total']} ({off['score']['percent'] if off['score']['percent'] is not None else 0}%)",
                 f"Без RAG — не найдены: {', '.join(off['score']['missing']) or 'все признаки найдены'}",
                 f"Ответ без RAG: {off['answer']}",
-                f"С RAG — признаки: {on['score']['passed']}/{on['score']['total']} ({on['score']['percent'] if on['score']['percent'] is not None else 0}%)",
-                f"С RAG — не найдены: {', '.join(on['score']['missing']) or 'все признаки найдены'}",
-                f"Ответ с RAG: {on['answer']}",
+                f"RAG без фильтра — признаки: {baseline['score']['passed']}/{baseline['score']['total']} ({baseline['score']['percent'] if baseline['score']['percent'] is not None else 0}%)",
+                f"RAG без фильтра — не найдены: {', '.join(baseline['score']['missing']) or 'все признаки найдены'}",
+                f"Ответ RAG без фильтра: {baseline['answer']}",
+                f"RAG с фильтром — признаки: {filtered['score']['passed']}/{filtered['score']['total']} ({filtered['score']['percent'] if filtered['score']['percent'] is not None else 0}%)",
+                f"RAG с фильтром — не найдены: {', '.join(filtered['score']['missing']) or 'все признаки найдены'}",
+                f"Ответ RAG с фильтром: {filtered['answer']}",
                 "",
             ])
         _update_evaluation(job_id, status="complete", report="\n".join(report), results=results.copy())
@@ -177,20 +222,50 @@ def _run_rag_comparison(
     try:
         from document_indexer import DocumentIndexer
 
-        matches = DocumentIndexer(ROOT).search(question, strategy="all", source_prefix="docs/")[:3]
-        retrieved_sources = list(dict.fromkeys(m.get("source", "") for m in matches if m.get("source")))
-        snippets = [{
+        _update_evaluation(job_id, stage="retrieval")
+        indexer = DocumentIndexer(ROOT)
+        retrieval = indexer.compare_retrieval(
+            question,
+            source_prefix="docs/",
+            top_k_before=base_agent.rag_top_k_before,
+            top_k_after=base_agent.rag_top_k_after,
+            similarity_threshold=base_agent.rag_similarity_threshold,
+            query_rewrite_enabled=base_agent.rag_query_rewrite_enabled,
+        )
+
+        def _make_snippets(chunks: list, kind: str) -> list:
+            return [{
             "source": match.get("source", "неизвестный источник"),
             "section": match.get("section", ""),
             "text": match.get("text", "")[:900],
-        } for match in matches]
+            "similarity": match.get("similarity"),
+            "search_score": match.get("search_score"),
+            "matched_terms": match.get("matched_terms", []),
+            "kind": kind,
+            } for match in chunks]
 
-        _update_evaluation(job_id, stage="rag_answer")
-        rag_agent = _comparison_agent(base_agent, rag_enabled=True)
-        rag_result = rag_agent.chat(
-            question, mcp_clients=[], history=[], persist_state=False, rag_source_prefix="docs/"
+        baseline_chunks = retrieval["baseline_results"]
+        filtered_chunks = retrieval["filtered_results"]
+        baseline_sources = list(dict.fromkeys(m.get("source", "") for m in baseline_chunks if m.get("source")))
+        filtered_sources = list(dict.fromkeys(m.get("source", "") for m in filtered_chunks if m.get("source")))
+
+        _update_evaluation(job_id, stage="baseline_answer")
+        baseline_agent = _comparison_agent(base_agent, rag_enabled=True)
+        baseline_result = baseline_agent.chat(
+            question,
+            mcp_clients=[], history=[], persist_state=False,
+            rag_source_prefix="docs/", rag_chunks=baseline_chunks,
         )
-        rag_answer = _answer_text(rag_result)
+        baseline_answer = _answer_text(baseline_result)
+
+        _update_evaluation(job_id, stage="filtered_answer")
+        filtered_agent = _comparison_agent(base_agent, rag_enabled=True)
+        filtered_result = filtered_agent.chat(
+            question,
+            mcp_clients=[], history=[], persist_state=False,
+            rag_source_prefix="docs/", rag_chunks=filtered_chunks,
+        )
+        filtered_answer = _answer_text(filtered_result)
 
         _update_evaluation(job_id, stage="plain_answer")
         plain_agent = _comparison_agent(base_agent, rag_enabled=False)
@@ -204,8 +279,10 @@ def _run_rag_comparison(
         summary_agent.rag_mode_enabled = False
         summary_agent.planning_mode_enabled = False
         summary_agent.system_prompt = (
-            "Ты кратко и нейтрально сравниваешь два ответа на один вопрос. "
-            "Сверяй сами тексты ответов с ожиданием и найденными фрагментами. "
+            "Ты кратко и нейтрально сравниваешь три ответа на один вопрос. "
+            "Сверяй сами тексты ответов с каждым пунктом ожидания и найденными фрагментами. "
+            "Если baseline и filtered оба полностью отвечают на вопрос, прямо скажи, что существенной разницы в качестве нет. "
+            "Не называй ответ улучшенным только из-за более подробной формулировки; отмечай добавленные детали как улучшение только если они точны, уместны и подтверждены источником. "
             "Если ответ обещает поиск, просит подождать или не содержит ответа по существу, "
             "обязательно назови его незавершённым, даже если поиск нашёл источник. "
             "Не считай наличие найденного источника доказательством, что ответ его использовал. "
@@ -215,8 +292,18 @@ def _run_rag_comparison(
         summary_prompt = (
             f"Вопрос: {question}\n"
             f"Ожидаемый результат: {expected or 'не задан'}\n\n"
-            f"Найденные фрагменты документов (JSON):\n{json.dumps(snippets, ensure_ascii=False)}\n\n"
-            f"Ответ с RAG:\n{rag_answer}\n\n"
+            f"Запрос после rewriting: {retrieval['rewritten_query']}\n"
+            f"Параметры: K до фильтра={retrieval['top_k_before']}, K после={retrieval['top_k_after']}, "
+            f"порог similarity={retrieval['similarity_threshold']:.2f}.\n"
+            f"Ожидаемые источники: {', '.join(expected_sources) or 'не заданы'}. "
+            f"Найдено baseline: {len([s for s in expected_sources if s in baseline_sources])}/{len(expected_sources)}; "
+            f"после фильтра: {len([s for s in expected_sources if s in filtered_sources])}/{len(expected_sources)}.\n"
+            f"Кандидаты: {len(retrieval['candidates_before_filter'])}; выше порога: {retrieval['passed_threshold_count']}; "
+            f"отсечено порогом: {retrieval['dropped_by_threshold_count']}; ограничено Top-K: {retrieval['trimmed_by_top_k_count']}.\n"
+            f"Кандидаты до фильтра: {json.dumps(_make_snippets(retrieval['candidates_before_filter'], 'до фильтра'), ensure_ascii=False)}\n\n"
+            f"Фрагменты после фильтра: {json.dumps(_make_snippets(filtered_chunks, 'после фильтра'), ensure_ascii=False)}\n\n"
+            f"Ответ RAG без фильтра и rewriting:\n{baseline_answer}\n\n"
+            f"Ответ RAG с фильтром и rewriting:\n{filtered_answer}\n\n"
             f"Ответ без RAG:\n{plain_answer}\n\n"
             "Сделай короткое саммари сравнения по указанным выше критериям."
         )
@@ -232,9 +319,27 @@ def _run_rag_comparison(
             "question": question,
             "expected": expected,
             "expected_sources": expected_sources,
-            "retrieved_sources": retrieved_sources,
-            "snippets": snippets,
-            "with_rag": rag_answer,
+            "retrieved_sources": filtered_sources,
+            "baseline_sources": baseline_sources,
+            "filtered_sources": filtered_sources,
+            "baseline_matched_sources": [source for source in expected_sources if source in baseline_sources],
+            "filtered_matched_sources": [source for source in expected_sources if source in filtered_sources],
+            "query_rewrite_enabled": retrieval["query_rewrite_enabled"],
+            "rewritten_query": retrieval["rewritten_query"],
+            "top_k_before": retrieval["top_k_before"],
+            "top_k_after": retrieval["top_k_after"],
+            "similarity_threshold": retrieval["similarity_threshold"],
+            "candidate_count_before": len(retrieval["candidates_before_filter"]),
+            "passed_threshold_count": retrieval["passed_threshold_count"],
+            "dropped_by_threshold_count": retrieval["dropped_by_threshold_count"],
+            "trimmed_by_top_k_count": retrieval["trimmed_by_top_k_count"],
+            "candidate_count_after": len(filtered_chunks),
+            "baseline_count_after": len(baseline_chunks),
+            "baseline_snippets": _make_snippets(baseline_chunks, 'без фильтра'),
+            "candidate_snippets": _make_snippets(retrieval["candidates_before_filter"], 'до фильтра'),
+            "snippets": _make_snippets(filtered_chunks, 'после фильтра'),
+            "with_rag": filtered_answer,
+            "baseline_answer": baseline_answer,
             "without_rag": plain_answer,
             "summary": summary,
         }
@@ -289,10 +394,11 @@ SIDEBAR_STATS_HTML = """
   <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem; color: #60a5fa;">🛤 Жизненный цикл (TSM):</label>
   <div style="margin-bottom: 8px; background: rgba(96, 165, 250, 0.1); padding: 6px 8px; border-radius: 6px; border: 1px solid rgba(96, 165, 250, 0.2);">
     <label class="checkbox-group" style="margin: 0; cursor: pointer; color: #93c5fd; font-size: 0.75rem; display: flex; align-items: center; gap: 6px;">
-      <input type="checkbox" id="planning_mode_enabled" checked onchange="togglePlanningMode(this.checked)">
+      <input type="checkbox" id="planning_mode_enabled" onchange="togglePlanningMode(this.checked)">
       <b>Включить режим планирования (TSM)</b>
     </label>
   </div>
+  <div id="tsmControls" style="display: none; flex-direction: column; gap: 8px;">
   <div style="display: flex; flex-direction: column; gap: 5px; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px; border: 1px solid var(--border);">
     <div style="display: flex; justify-content: space-between; align-items: center;">
       <span id="badge_none" class="stage-badge">NONE</span>
@@ -313,6 +419,7 @@ SIDEBAR_STATS_HTML = """
   <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 10px; background: rgba(0,0,0,0.1); padding: 8px; border-radius: 6px; border: 1px dashed var(--border);">
     <span style="font-size: 0.7rem; color: var(--text-dim); font-weight: bold; text-transform: uppercase;">Переход в состояние:</span>
     <div id="transitionButtons" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px;"></div>
+  </div>
   </div>
 </div>
 
@@ -365,13 +472,33 @@ SIDEBAR_STATS_HTML = """
   </div>
 </div>
 
-<!-- RAG setting remains in the sidebar; comparison controls live in their own view. -->
+<!-- RAG settings for both the ordinary chat and comparison. -->
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
   <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem; color: #f43f5e;">🔬 RAG:</label>
-  <label class="checkbox-group" style="margin: 0; cursor: pointer; color: #fda4af; font-size: 0.75rem; display: flex; align-items: center; gap: 6px;">
-    <input type="checkbox" id="rag_mode_enabled" checked onchange="toggleRagMode(this.checked)">
-    <b>Добавлять найденный контекст в обычный чат</b>
+  <label class="checkbox-group" style="margin: 0 0 8px; cursor: pointer; color: #c4b5fd; font-size: 0.75rem; display: flex; align-items: center; gap: 6px;">
+    <input type="checkbox" id="rag_settings_visible" onchange="toggleRagSettings(this.checked)">
+    <b>Показать настройки RAG</b>
   </label>
+  <div id="ragSettingsControls" style="display: none; flex-direction: column; gap: 8px; padding: 9px; background: rgba(0,0,0,.2); border: 1px solid var(--border); border-radius: 7px;">
+    <label class="checkbox-group" style="margin: 0; cursor: pointer; color: #fda4af; font-size: 0.75rem; display: flex; align-items: center; gap: 6px;">
+      <input type="checkbox" id="rag_mode_enabled" checked onchange="toggleRagMode(this.checked)">
+      <b>Добавлять RAG-контекст в чат</b>
+    </label>
+    <label class="checkbox-group" style="margin: 0; cursor: pointer; color: var(--text-dim); font-size: 0.75rem; display: flex; align-items: center; gap: 6px;">
+      <input type="checkbox" id="ragRewriteEnabled" checked>
+      <b>Переписывать запрос эвристически</b>
+    </label>
+    <label style="font-size:.72rem; color:var(--text-dim);">Top-K кандидатов до фильтра
+      <input id="ragTopKBefore" type="number" min="1" max="50" value="10" class="input-field" style="font-size:.75rem; padding:5px; height:auto;">
+    </label>
+    <label style="font-size:.72rem; color:var(--text-dim);">Порог similarity (0–1)
+      <input id="ragSimilarityThreshold" type="number" min="0" max="1" step="0.05" value="0.25" class="input-field" style="font-size:.75rem; padding:5px; height:auto;">
+    </label>
+    <label style="font-size:.72rem; color:var(--text-dim);">Top-K фрагментов после фильтра
+      <input id="ragTopKAfter" type="number" min="1" max="20" value="3" class="input-field" style="font-size:.75rem; padding:5px; height:auto;">
+    </label>
+    <span style="font-size:.67rem; line-height:1.4; color:var(--text-dim);">Сначала поиск выбирает до K кандидатов. Порог similarity отбрасывает слабые совпадения, затем Top-K ограничивает число фрагментов для модели. Переписывание выполняет локальная эвристика: нормализует слова и добавляет заданные синонимы; отдельная модель для него не вызывается. Настройки действуют в чате и в улучшенном варианте сравнения.</span>
+  </div>
 </div>
 
 <!-- TOKEN STATS -->
@@ -415,7 +542,7 @@ COMPARISON_VIEW_HTML = """
     <header class="compare-header">
       <div>
         <h1 id="comparisonTitle">Сравнение ответов</h1>
-        <p>Один вопрос отправляется модели в двух режимах. Настройки модели и параметры берутся из сайдбара.</p>
+        <p>Сравните исходный поиск с переписанным запросом и фильтром релевантности. Настройки модели берутся из сайдбара.</p>
       </div>
       <button id="runBenchmarkBtn" class="benchmark-btn" type="button" onclick="runRagEvaluation(this)">Запустить все 10 вопросов</button>
     </header>
@@ -445,7 +572,9 @@ COMPARISON_VIEW_HTML = """
         <div class="loader"></div>
         <div><h2>Сравниваем ответы</h2><p>Не закрывайте эту вкладку, пока идёт обработка.</p></div>
         <ol class="stage-list">
-          <li data-stage="rag_answer">Генерируется ответ с RAG</li>
+          <li data-stage="retrieval">Переписывается запрос и отбираются фрагменты</li>
+          <li data-stage="baseline_answer">Генерируется ответ без фильтра</li>
+          <li data-stage="filtered_answer">Генерируется ответ с фильтром</li>
           <li data-stage="plain_answer">Генерируется ответ без RAG</li>
           <li data-stage="summary">Генерируется саммари ответов</li>
         </ol>
@@ -459,20 +588,25 @@ COMPARISON_VIEW_HTML = """
           <span class="result-label">Ожидаемый результат</span>
           <div id="resultExpected"></div>
         </div>
+        <section id="retrievalMetrics" class="retrieval-metrics"></section>
         <div class="answer-grid">
-          <section class="answer-card rag-answer-card">
-            <h3>С RAG</h3>
-            <div id="ragAnswer" class="answer-content markdown-content"></div>
-            <details id="retrievedDetails" class="sources-details">
-              <summary>Найденные источники и фрагменты</summary>
-              <div id="retrievedSources"></div>
-            </details>
+          <section class="answer-card baseline-answer-card">
+            <h3>RAG без фильтра и rewriting</h3>
+            <div id="baselineAnswer" class="answer-content markdown-content"></div>
+          </section>
+          <section class="answer-card filtered-answer-card">
+            <h3>RAG с query rewrite и фильтром</h3>
+            <div id="filteredAnswer" class="answer-content markdown-content"></div>
           </section>
           <section class="answer-card plain-answer-card">
-            <h3>Без RAG</h3>
+            <h3>Без RAG — контроль</h3>
             <div id="plainAnswer" class="answer-content markdown-content"></div>
           </section>
         </div>
+        <details id="retrievedDetails" class="sources-details">
+          <summary>Показать кандидатов до фильтра и фрагменты после отбора</summary>
+          <div id="retrievedSources"></div>
+        </details>
         <section class="summary-block">
           <h3>Саммари ответов</h3>
           <div id="answerSummary" class="markdown-content"></div>
@@ -516,20 +650,23 @@ COMPARISON_VIEW_HTML = """
   .result-question-block h2 { margin: 5px 0 0; font-size: 1.12rem; line-height: 1.5; }
   .expected-block { border-left: 3px solid #fbbf24; background: rgba(251,191,36,.08); border-radius: 0 8px 8px 0; padding: 12px 14px; margin-bottom: 16px; line-height: 1.55; }
   .expected-block > div { margin-top: 5px; }
-  .answer-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+  .answer-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
   .answer-card { min-width: 0; border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: rgba(15,23,42,.5); }
-  .rag-answer-card { border-top: 3px solid #34d399; }
+  .baseline-answer-card { border-top: 3px solid #f59e0b; }
+  .filtered-answer-card { border-top: 3px solid #34d399; }
   .plain-answer-card { border-top: 3px solid #60a5fa; }
   .answer-card h3, .summary-block h3 { margin: 0 0 10px; font-size: 1rem; }
   .answer-content, .summary-block { line-height: 1.6; overflow-wrap: anywhere; }
   .markdown-content p { margin: 0 0 9px; }
   .markdown-content p:last-child { margin-bottom: 0; }
   .sources-details { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); font-size: .82rem; }
+  .retrieval-metrics { display: grid; gap: 6px; padding: 10px 12px; margin-bottom: 12px; border-radius: 8px; background: rgba(99,102,241,.1); color: var(--text-dim); font-size: .82rem; overflow-wrap: anywhere; }
+  .retrieval-metrics strong { color: var(--text-main); }
   .source-chunk { margin-top: 8px; padding: 9px; border-radius: 7px; background: rgba(255,255,255,.04); color: var(--text-dim); white-space: pre-wrap; }
   .source-chunk strong { display: block; color: #a7f3d0; margin-bottom: 5px; }
   .summary-block { margin-top: 14px; border-radius: 10px; border: 1px solid rgba(168,85,247,.45); background: rgba(168,85,247,.08); padding: 14px; }
   .benchmark-result { margin-top: 14px; white-space: pre-wrap; font-size: .84rem; line-height: 1.55; border-top: 1px solid var(--border); padding-top: 14px; }
-  @media (max-width: 900px) { .question-bank, .answer-grid { grid-template-columns: 1fr; } .compare-header, .panel-heading { align-items: flex-start; flex-direction: column; } }
+  @media (max-width: 1100px) { .question-bank, .answer-grid { grid-template-columns: 1fr; } .compare-header, .panel-heading { align-items: flex-start; flex-direction: column; } }
 </style>
 """
 
@@ -565,10 +702,25 @@ async function refreshUI() {
                 const cb = document.getElementById('planning_mode_enabled');
                 if (cb) cb.checked = state.config.planning_mode_enabled;
             }
+            const tsmControls = document.getElementById('tsmControls');
+            if (tsmControls) tsmControls.style.display = state.config.planning_mode_enabled ? 'flex' : 'none';
             if (state.config.rag_mode_enabled !== undefined) {
                 const cbRag = document.getElementById('rag_mode_enabled');
                 if (cbRag) cbRag.checked = state.config.rag_mode_enabled;
             }
+            const ragSettingsVisible = Boolean(state.config.rag_settings_visible);
+            const ragSettingsToggle = document.getElementById('rag_settings_visible');
+            if (ragSettingsToggle) ragSettingsToggle.checked = ragSettingsVisible;
+            const ragSettingsControls = document.getElementById('ragSettingsControls');
+            if (ragSettingsControls) ragSettingsControls.style.display = ragSettingsVisible ? 'flex' : 'none';
+            const rewrite = document.getElementById('ragRewriteEnabled');
+            if (rewrite) rewrite.checked = state.config.rag_query_rewrite_enabled !== false;
+            const before = document.getElementById('ragTopKBefore');
+            if (before) before.value = state.config.rag_top_k_before || 10;
+            const after = document.getElementById('ragTopKAfter');
+            if (after) after.value = state.config.rag_top_k_after || 3;
+            const threshold = document.getElementById('ragSimilarityThreshold');
+            if (threshold) threshold.value = state.config.rag_similarity_threshold ?? 0.25;
             const invariantsEnabled = Boolean(state.config.invariants_enabled);
             const invariantToggle = document.getElementById('invariants_enabled');
             if (invariantToggle) invariantToggle.checked = invariantsEnabled;
@@ -667,7 +819,7 @@ async function refreshUI() {
                 addMessage(isBot ? 'bot' : 'user', m.content, isBot ? {model: m.model, time: m.time, usage: m.usage} : null);
             });
         } else {
-            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! Я агент с поддержкой **RAG (День 22)**. Переключай режим RAG ON/OFF в сайдбаре и тестируй качество ответов на контрольных вопросах! 🔬💡</div></div>';
+            chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! Это RAG с переписыванием запроса и фильтром релевантности (День 23). Настрой порог и Top-K во вкладке «Сравнение».</div></div>';
         }
 
         if (state.stats) {
@@ -686,6 +838,34 @@ async function toggleRagMode(enabled) {
         body: JSON.stringify({rag_mode_enabled: enabled})
     });
 }
+
+async function toggleRagSettings(visible) {
+    const controls = document.getElementById('ragSettingsControls');
+    controls.style.display = visible ? 'flex' : 'none';
+    await fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({rag_settings_visible: visible})
+    });
+}
+
+async function saveRetrievalSettings() {
+    const config = comparisonConfig();
+    await fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            rag_query_rewrite_enabled: config.rag_query_rewrite_enabled,
+            rag_top_k_before: config.rag_top_k_before,
+            rag_top_k_after: config.rag_top_k_after,
+            rag_similarity_threshold: config.rag_similarity_threshold
+        })
+    });
+}
+
+['ragRewriteEnabled', 'ragTopKBefore', 'ragTopKAfter', 'ragSimilarityThreshold'].forEach(id => {
+    document.getElementById(id).addEventListener('change', saveRetrievalSettings);
+});
 
 function showAppView(view) {
     const isComparison = view === 'comparison';
@@ -726,19 +906,30 @@ async function loadComparisonQuestions() {
 }
 
 function comparisonConfig() {
+    const topKBefore = Math.max(1, Math.min(50, Number(document.getElementById('ragTopKBefore').value) || 10));
+    const topKAfter = Math.max(1, Math.min(topKBefore, Number(document.getElementById('ragTopKAfter').value) || 3));
+    const requestedThreshold = Number(document.getElementById('ragSimilarityThreshold').value);
+    const similarityThreshold = Math.max(0, Math.min(1, Number.isFinite(requestedThreshold) ? requestedThreshold : 0.25));
+    document.getElementById('ragTopKBefore').value = topKBefore;
+    document.getElementById('ragTopKAfter').value = topKAfter;
+    document.getElementById('ragSimilarityThreshold').value = similarityThreshold;
     const config = {
         system_prompt: document.getElementById('sysPrompt').value,
         model: document.getElementById('modelSelect').value,
         temperature: document.getElementById('tempSlider').value,
         top_p: document.getElementById('topPSlider').value,
-        top_k: document.getElementById('topKSlider').value
+        top_k: document.getElementById('topKSlider').value,
+        rag_query_rewrite_enabled: document.getElementById('ragRewriteEnabled').checked,
+        rag_top_k_before: topKBefore,
+        rag_top_k_after: topKAfter,
+        rag_similarity_threshold: similarityThreshold
     };
     document.querySelectorAll('.sidebar input[type="checkbox"]').forEach(cb => { config[cb.id] = cb.checked; });
     return config;
 }
 
 function setComparisonStage(stage) {
-    const order = ['rag_answer', 'plain_answer', 'summary'];
+    const order = ['retrieval', 'baseline_answer', 'filtered_answer', 'plain_answer', 'summary'];
     const activeIndex = order.indexOf(stage);
     document.querySelectorAll('.stage-list li').forEach((item, index) => {
         item.classList.toggle('active', index === activeIndex);
@@ -750,6 +941,7 @@ function setComparisonBusy(isBusy) {
     document.querySelectorAll('.question-option').forEach(button => { button.disabled = isBusy; });
     document.getElementById('customCompareBtn').disabled = isBusy;
     document.getElementById('runBenchmarkBtn').disabled = isBusy;
+    document.querySelectorAll('#ragSettingsControls input').forEach(input => { input.disabled = isBusy; });
 }
 
 function renderComparison(result) {
@@ -758,32 +950,64 @@ function renderComparison(result) {
     document.getElementById('comparisonCard').hidden = false;
     document.getElementById('resultQuestion').textContent = result.question || '';
     document.getElementById('resultExpected').textContent = result.expected || 'Ожидаемый результат не задан для этого вопроса.';
-    document.getElementById('ragAnswer').innerHTML = marked.parse(result.with_rag || 'Модель не вернула ответ.');
+    document.getElementById('baselineAnswer').innerHTML = marked.parse(result.baseline_answer || 'Модель не вернула ответ.');
+    document.getElementById('filteredAnswer').innerHTML = marked.parse(result.with_rag || 'Модель не вернула ответ.');
     document.getElementById('plainAnswer').innerHTML = marked.parse(result.without_rag || 'Модель не вернула ответ.');
     document.getElementById('answerSummary').innerHTML = marked.parse(result.summary || 'Саммари не получено.');
 
+    const expectedSources = result.expected_sources || [];
+    const baselineSources = result.baseline_sources || [];
+    const filteredSources = result.filtered_sources || [];
+    const metricEl = document.getElementById('retrievalMetrics');
+    metricEl.replaceChildren();
+    const metrics = [
+        ['Запрос после rewriting', result.rewritten_query || result.question || ''],
+        ['Кандидаты для проверки', `${result.candidate_count_before ?? 0} из K=${result.top_k_before ?? 0}`],
+        ['Результат отбора', `${result.passed_threshold_count ?? 0} выше порога; отсечено порогом ${result.dropped_by_threshold_count ?? 0}; после Top-K осталось ${result.candidate_count_after ?? 0} из K=${result.top_k_after ?? 0} (порог ${Number(result.similarity_threshold ?? 0).toFixed(2)}; ещё ограничено Top-K: ${result.trimmed_by_top_k_count ?? 0})`],
+        ['Ожидаемые источники', expectedSources.join(', ') || 'не заданы'],
+        ['Источники без фильтра', `${baselineSources.join(', ') || 'нет'}; совпало с ожиданием ${result.baseline_matched_sources?.length ?? 0}/${expectedSources.length}`],
+        ['Источники с фильтром', `${filteredSources.join(', ') || 'нет'}; совпало с ожиданием ${result.filtered_matched_sources?.length ?? 0}/${expectedSources.length}`]
+    ];
+    metrics.forEach(([label, value]) => {
+        const row = document.createElement('div');
+        const strong = document.createElement('strong');
+        strong.textContent = `${label}: `;
+        row.append(strong, document.createTextNode(value));
+        metricEl.appendChild(row);
+    });
+
     const sourceContainer = document.getElementById('retrievedSources');
     sourceContainer.innerHTML = '';
-    (result.snippets || []).forEach(snippet => {
-        const block = document.createElement('div');
-        block.className = 'source-chunk';
-        const source = document.createElement('strong');
-        source.textContent = `${snippet.source || 'Источник'}${snippet.section ? ` — ${snippet.section}` : ''}`;
-        const text = document.createElement('span');
-        text.textContent = snippet.text || '';
-        block.append(source, text);
-        sourceContainer.appendChild(block);
+    const groups = [
+        ['Кандидаты до фильтра', result.candidate_snippets || []],
+        ['Baseline: фрагменты, переданные модели', result.baseline_snippets || []],
+        ['После фильтра: фрагменты, переданные модели', result.snippets || []]
+    ];
+    groups.forEach(([label, snippets]) => {
+        const heading = document.createElement('h4');
+        heading.textContent = label;
+        sourceContainer.appendChild(heading);
+        if (!snippets.length) {
+            const empty = document.createElement('div');
+            empty.className = 'source-chunk';
+            empty.textContent = 'Подходящих фрагментов нет.';
+            sourceContainer.appendChild(empty);
+        }
+        snippets.forEach(snippet => {
+            const block = document.createElement('div');
+            block.className = 'source-chunk';
+            const source = document.createElement('strong');
+            const score = snippet.similarity == null
+                ? `совпадений: ${snippet.search_score ?? 0}`
+                : `similarity: ${Number(snippet.similarity).toFixed(2)}`;
+            source.textContent = `${snippet.source || 'Источник'}${snippet.section ? ` — ${snippet.section}` : ''} (${score}; слова: ${(snippet.matched_terms || []).join(', ') || '—'})`;
+            const text = document.createElement('span');
+            text.textContent = snippet.text || '';
+            block.append(source, text);
+            sourceContainer.appendChild(block);
+        });
     });
-    if (!sourceContainer.childElementCount) sourceContainer.textContent = 'По этому вопросу релевантные фрагменты не найдены.';
-    const retrieved = new Set(result.retrieved_sources || []);
-    const expectedSources = result.expected_sources || [];
     document.getElementById('retrievedDetails').open = false;
-    if (expectedSources.length) {
-        const sourceStatus = document.createElement('div');
-        sourceStatus.className = 'source-chunk';
-        sourceStatus.textContent = `Ожидаемые источники: ${expectedSources.join(', ')}. Найдены: ${[...retrieved].join(', ') || 'нет'}.`;
-        sourceContainer.prepend(sourceStatus);
-    }
     document.getElementById('comparisonResult').scrollIntoView({behavior: 'smooth', block: 'start'});
 }
 
@@ -796,7 +1020,7 @@ async function startRagComparison(question, expected = '', expectedSources = [])
     document.getElementById('benchmarkResult').hidden = true;
     document.getElementById('comparisonLoading').hidden = false;
     document.getElementById('comparisonResult').scrollIntoView({behavior: 'smooth', block: 'start'});
-    setComparisonStage('rag_answer');
+    setComparisonStage('retrieval');
 
     try {
         const response = await fetch('/api/rag/compare', {
@@ -851,19 +1075,19 @@ async function waitForRagJob(startData, onProgress) {
 async function runRagEvaluation(button) {
     const resultEl = document.getElementById('benchmarkResult');
     resultEl.hidden = false;
-    resultEl.textContent = 'Подготовка оценки: по каждому из 10 вопросов генерируются два ответа…';
+    resultEl.textContent = 'Подготовка оценки: сравниваются RAG без фильтра, RAG с фильтром и ответ без RAG…';
     setComparisonBusy(true);
 
     try {
         const startRes = await fetch('/api/rag/evaluate', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({})
+            body: JSON.stringify({config: comparisonConfig()})
         });
         const startData = await startRes.json();
         if (!startRes.ok || startData.error) throw new Error(startData.error || 'Не удалось запустить оценку');
         const result = await waitForRagJob(startData, job => {
-            resultEl.textContent = `Выполнено вопросов: ${job.completed || 0}/${job.total || 10}. Сравниваются ответы без RAG и с RAG…`;
+            resultEl.textContent = `Выполнено вопросов: ${job.completed || 0}/${job.total || 10}. Сравнивается качество retrieval и ответов…`;
         });
         if (result.status === 'complete' && result.report) {
             resultEl.textContent = result.report;
@@ -887,6 +1111,8 @@ async function forceTransition(stage) {
 }
 
 async function togglePlanningMode(enabled) {
+    const controls = document.getElementById('tsmControls');
+    controls.style.display = enabled ? 'flex' : 'none';
     await fetch('/api/config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1092,7 +1318,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         page_html = get_chat_page(
-            title="RAG vs Non-RAG Evaluation — День 22",
+            title="RAG Query Rewrite & Reranking — День 23",
             extra_sidebar_html=SIDEBAR_STATS_HTML,
             extra_scripts=EXTRA_SCRIPTS,
             extra_main_html=COMPARISON_VIEW_HTML,
@@ -1156,10 +1382,12 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "running",
                     "completed": 0,
                     "total": 1,
-                    "stage": "rag_answer",
+                    "stage": "retrieval",
                 })
 
             elif path == "/api/rag/evaluate":
+                data = json.loads(raw_body or "{}")
+                config = data.get("config", {})
                 eval_file = ROOT / "rag_evaluation_questions.json"
                 if not eval_file.exists():
                     self._send_json({"error": "rag_evaluation_questions.json not found"})
@@ -1187,6 +1415,8 @@ class Handler(BaseHTTPRequestHandler):
                         "results": [],
                     }
                 with _LOCK:
+                    if isinstance(config, dict):
+                        agent.set_config(config)
                     base_agent = copy.deepcopy(agent)
                 worker = threading.Thread(
                     target=_run_rag_evaluation,
@@ -1281,7 +1511,7 @@ def load_env() -> None:
 
 if __name__ == "__main__":
     load_env()
-    print(f"🚀 День 22 RAG Evaluation Agent & Sidebar: http://127.0.0.1:{PORT}")
+    print(f"🚀 День 23 RAG Reranking Agent & Sidebar: http://127.0.0.1:{PORT}")
     class ReusableThreadingHTTPServer(ThreadingHTTPServer):
         allow_reuse_address = True
     try:

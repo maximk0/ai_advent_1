@@ -36,9 +36,14 @@ class SimpleAgent:
         self.top_p = 1.0
         self.top_k = 0
         self.context_compression = True
-        self.planning_mode_enabled = True
+        self.planning_mode_enabled = False
         self.rag_mode_enabled = True
+        self.rag_settings_visible = False
         self.invariants_enabled = False
+        self.rag_query_rewrite_enabled = True
+        self.rag_top_k_before = 10
+        self.rag_top_k_after = 3
+        self.rag_similarity_threshold = 0.25
 
         # Трехуровневая система памяти
         self.wm = {}   # Working Memory: текущая задача, активный контекст
@@ -82,6 +87,7 @@ class SimpleAgent:
 
     def _save_state(self):
         state = {
+            "settings_version": 2,
             "history": self.history,
             "summary_context": self.summary_context,
             "saved_tokens": self.saved_tokens,
@@ -104,7 +110,12 @@ class SimpleAgent:
                 "context_compression": self.context_compression,
                 "planning_mode_enabled": self.planning_mode_enabled,
                 "rag_mode_enabled": self.rag_mode_enabled,
+                "rag_settings_visible": self.rag_settings_visible,
                 "invariants_enabled": self.invariants_enabled,
+                "rag_query_rewrite_enabled": self.rag_query_rewrite_enabled,
+                "rag_top_k_before": self.rag_top_k_before,
+                "rag_top_k_after": self.rag_top_k_after,
+                "rag_similarity_threshold": self.rag_similarity_threshold,
             },
             "stats": self.get_token_stats()
         }
@@ -122,6 +133,7 @@ class SimpleAgent:
         try:
             with open(self.STATE_FILE, "r", encoding="utf-8") as f:
                 state = json.load(f)
+                migrate_settings_defaults = state.get("settings_version", 1) < 2
                 self.summary_context = state.get("summary_context", "")
                 self.saved_tokens = state.get("saved_tokens", 0)
                 self.wm = state.get("wm", {})
@@ -155,10 +167,21 @@ class SimpleAgent:
                 self.top_p = config.get("top_p", self.top_p)
                 self.top_k = config.get("top_k", self.top_k)
                 self.context_compression = config.get("context_compression", True)
-                self.planning_mode_enabled = config.get("planning_mode_enabled", True)
+                self.planning_mode_enabled = config.get("planning_mode_enabled", False)
                 self.rag_mode_enabled = config.get("rag_mode_enabled", True)
+                self.rag_settings_visible = config.get("rag_settings_visible", False)
                 self.invariants_enabled = config.get("invariants_enabled", False)
+                self.rag_query_rewrite_enabled = config.get("rag_query_rewrite_enabled", True)
+                self.rag_top_k_before = int(config.get("rag_top_k_before", 10))
+                self.rag_top_k_after = int(config.get("rag_top_k_after", 3))
+                self.rag_similarity_threshold = float(config.get("rag_similarity_threshold", 0.25))
+                if migrate_settings_defaults:
+                    # The old UI shipped with lifecycle planning checked by default.
+                    # Treat that legacy default as the new opt-in default once.
+                    self.planning_mode_enabled = False
             print(f"[{time.strftime('%H:%M:%S')}] State loaded from {self.STATE_FILE} ({len(self.history)} msgs)")
+            if migrate_settings_defaults:
+                self._save_state()
         except Exception as e:
             print(f"Error loading state: {e}")
 
@@ -173,8 +196,19 @@ class SimpleAgent:
             self.planning_mode_enabled = bool(config["planning_mode_enabled"])
         if "rag_mode_enabled" in config:
             self.rag_mode_enabled = bool(config["rag_mode_enabled"])
+        if "rag_settings_visible" in config:
+            self.rag_settings_visible = bool(config["rag_settings_visible"])
         if "invariants_enabled" in config:
             self.invariants_enabled = bool(config["invariants_enabled"])
+        if "rag_query_rewrite_enabled" in config:
+            self.rag_query_rewrite_enabled = bool(config["rag_query_rewrite_enabled"])
+        if "rag_top_k_before" in config:
+            self.rag_top_k_before = max(1, min(int(config["rag_top_k_before"]), 50))
+        if "rag_top_k_after" in config:
+            self.rag_top_k_after = max(1, min(int(config["rag_top_k_after"]), self.rag_top_k_before))
+        if "rag_similarity_threshold" in config:
+            self.rag_similarity_threshold = max(0.0, min(float(config["rag_similarity_threshold"]), 1.0))
+        self.rag_top_k_after = min(self.rag_top_k_after, self.rag_top_k_before)
         self._save_state()
 
     def clear_history(self, clear_all: bool = False):
@@ -336,6 +370,7 @@ class SimpleAgent:
         history: list | None = None,
         persist_state: bool = True,
         rag_source_prefix: str | None = None,
+        rag_chunks: list | None = None,
     ) -> dict:
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
@@ -434,14 +469,30 @@ class SimpleAgent:
         if self.rag_mode_enabled:
             try:
                 from document_indexer import DocumentIndexer
-                indexer = DocumentIndexer()
-                matches = indexer.search(
-                    user_message,
-                    strategy="all",
-                    source_prefix=rag_source_prefix,
-                )
+                if rag_chunks is not None:
+                    matches = rag_chunks
+                else:
+                    retrieval = DocumentIndexer().compare_retrieval(
+                        user_message,
+                        source_prefix=rag_source_prefix,
+                        top_k_before=self.rag_top_k_before,
+                        top_k_after=self.rag_top_k_after,
+                        similarity_threshold=self.rag_similarity_threshold,
+                        query_rewrite_enabled=self.rag_query_rewrite_enabled,
+                    )
+                    matches = retrieval["filtered_results"]
                 if matches:
-                    snippets = [f"📄 Источник [{m.get('source')} - {m.get('section')}]:\n{m.get('text')}" for m in matches[:3]]
+                    snippets = []
+                    for match in matches[:self.rag_top_k_after]:
+                        relevance = (
+                            f"similarity {match['similarity']:.0%}"
+                            if "similarity" in match
+                            else f"совпало терминов {match.get('search_score', 0)}"
+                        )
+                        snippets.append(
+                            f"📄 Источник [{match.get('source')} — {match.get('section')}]; "
+                            f"{relevance}:\n{match.get('text')}"
+                        )
                     rag_context_str = (
                         "=== RAG CONTEXT (Релевантные чанки из базы знаний проекта) ===\n"
                         "Используй найденные фрагменты и сразу ответь на вопрос. Не объявляй о будущем поиске и не проси ждать.\n\n"
@@ -450,7 +501,7 @@ class SimpleAgent:
                     messages.append({"role": "system", "content": rag_context_str})
                     print(f"[{time.strftime('%H:%M:%S')}] [RAG ON] Injected {len(matches[:3])} chunks into prompt.")
                 else:
-                    print(f"[{time.strftime('%H:%M:%S')}] [RAG ON] No matching chunks found for query.")
+                    print(f"[{time.strftime('%H:%M:%S')}] [RAG ON] No chunks passed the relevance filter.")
             except Exception as e:
                 print(f"[RAG Retrieval Error]: {e}")
         else:
@@ -649,7 +700,12 @@ class SimpleAgent:
                 "context_compression": self.context_compression,
                 "planning_mode_enabled": self.planning_mode_enabled,
                 "rag_mode_enabled": self.rag_mode_enabled,
+                "rag_settings_visible": self.rag_settings_visible,
                 "invariants_enabled": self.invariants_enabled,
+                "rag_query_rewrite_enabled": self.rag_query_rewrite_enabled,
+                "rag_top_k_before": self.rag_top_k_before,
+                "rag_top_k_after": self.rag_top_k_after,
+                "rag_similarity_threshold": self.rag_similarity_threshold,
             },
             "stats": self.get_token_stats()
         }

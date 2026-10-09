@@ -10,12 +10,37 @@ from __future__ import annotations
 
 import json
 import re
-import math
+import copy
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 
 ROOT_DIR = Path(__file__).resolve().parent
 INDEX_FILE = ROOT_DIR / "document_index.json"
+
+_STOP_WORDS = {
+    "а", "без", "бы", "в", "во", "вот", "все", "всего", "для", "до", "же", "за",
+    "и", "из", "или", "как", "к", "ко", "ли", "мне", "на", "над", "не", "ни",
+    "но", "о", "об", "от", "по", "под", "при", "про", "с", "со", "так", "то",
+    "у", "что", "это", "этот", "эта", "эти", "я", "он", "она", "они", "мы",
+    "где", "когда", "кто", "какой", "какая", "какие", "каков", "сколько", "его", "ее",
+    "находи", "иметь", "быть", "можно", "нужно",
+}
+_WORD_RE = re.compile(r"[a-zа-яё0-9]+(?:[-_][a-zа-яё0-9]+)*|\d+(?:[.,]\d+)?", re.IGNORECASE)
+_RU_SUFFIXES = (
+    "иями", "ями", "ами", "ываются", "иваются", "аются", "яются", "утся", "ются", "ется",
+    "иться", "аться", "ого", "ему", "ому", "ыми", "ими", "ая", "яя", "ое", "ее",
+    "ые", "ие", "ый", "ий", "ой", "ую", "юю", "ого", "его", "ому", "ему", "ах",
+    "ях", "ам", "ям", "ом", "ем", "ой", "ей", "ать", "ять", "ить", "еть", "ться",
+    "тся", "ть", "ы", "и", "а", "я", "у", "ю", "е",
+)
+_SYNONYMS = {
+    "отказ": ("неисправность", "поломка"),
+    "датчик": ("сенсор",),
+    "температур": ("нагрев", "тепло"),
+    "дежурн": ("оператор",),
+    "показан": ("измерение", "замер"),
+    "иск": ("найти", "поиск"),
+}
 
 class DocumentIndexer:
     def __init__(self, root_dir: Path = ROOT_DIR):
@@ -193,38 +218,137 @@ class DocumentIndexer:
         INDEX_FILE.write_text(json.dumps(index_data, ensure_ascii=False, indent=2), encoding="utf-8")
         return index_data
 
+    @staticmethod
+    def _normalize_token(token: str) -> str:
+        token = token.casefold().replace("ё", "е").replace("_", "-")
+        # Treat punctuation variants such as T-4 and T4 as the same identifier.
+        token = token.replace("-", "")
+        if re.search(r"[а-я]", token):
+            for suffix in _RU_SUFFIXES:
+                if len(token) - len(suffix) >= 3 and token.endswith(suffix):
+                    token = token[:-len(suffix)]
+                    break
+        return token
+
+    @classmethod
+    def _tokens(cls, text: str, remove_stop_words: bool = True) -> list[str]:
+        tokens = [cls._normalize_token(token) for token in _WORD_RE.findall(text or "")]
+        if remove_stop_words:
+            tokens = [token for token in tokens if token not in _STOP_WORDS and len(token) > 1]
+        return tokens
+
+    @classmethod
+    def rewrite_query(cls, query: str) -> str:
+        """Deterministically normalize a question and add a small set of domain synonyms."""
+        original = [token.casefold().replace("ё", "е") for token in _WORD_RE.findall(query or "")]
+        original = [token for token in original if cls._normalize_token(token) not in _STOP_WORDS]
+        expanded = list(original)
+        for token in original:
+            expanded.extend(_SYNONYMS.get(cls._normalize_token(token), ()))
+        return " ".join(dict.fromkeys(expanded))
+
+    def _load_chunks(self) -> list[dict[str, Any]]:
+        if not INDEX_FILE.exists():
+            self.build_index()
+        try:
+            data = json.loads(INDEX_FILE.read_text(encoding="utf-8"))
+            return data.get("chunks", [])
+        except Exception:
+            return self.chunks
+
+    def _rank(
+        self,
+        query: str,
+        source_prefix: str | None = None,
+        limit: int = 10,
+        strategy: str = "all",
+    ) -> list[dict[str, Any]]:
+        query_terms = set(self._tokens(query))
+        if not query_terms:
+            return []
+        ranked = []
+        for chunk in self._load_chunks():
+            if strategy != "all" and chunk.get("strategy") != strategy:
+                continue
+            if source_prefix and not chunk.get("source", "").startswith(source_prefix):
+                continue
+            terms = set(self._tokens(chunk.get("text", "")))
+            matched = query_terms & terms
+            if matched:
+                item = copy.deepcopy(chunk)
+                item["search_score"] = len(matched)
+                item["matched_terms"] = sorted(matched)
+                ranked.append(item)
+        ranked.sort(key=lambda item: item["search_score"], reverse=True)
+        return ranked[:max(0, int(limit))]
+
+    def compare_retrieval(
+        self,
+        query: str,
+        source_prefix: str | None = None,
+        top_k_before: int = 10,
+        top_k_after: int = 3,
+        similarity_threshold: float = 0.25,
+        query_rewrite_enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Return a baseline and a filtered/reranked result using comparable candidate limits."""
+        top_k_before = max(1, min(int(top_k_before), 50))
+        top_k_after = max(1, min(int(top_k_after), top_k_before))
+        similarity_threshold = max(0.0, min(float(similarity_threshold), 1.0))
+
+        rewritten_query = self.rewrite_query(query) if query_rewrite_enabled else query
+        baseline_candidates = self._rank(query, source_prefix, top_k_before)
+        rewritten_candidates = (
+            self._rank(rewritten_query, source_prefix, top_k_before)
+            if query_rewrite_enabled else copy.deepcopy(baseline_candidates)
+        )
+        query_terms = set(self._tokens(query))
+        rewritten_terms = set(self._tokens(rewritten_query))
+        expanded_terms = rewritten_terms - query_terms
+
+        filtered = []
+        for candidate in rewritten_candidates:
+            chunk_terms = set(self._tokens(candidate.get("text", "")))
+            original_hits = query_terms & chunk_terms
+            expanded_hits = expanded_terms & chunk_terms
+            # Exact question concepts carry more weight than added synonyms.
+            denominator = len(query_terms) + 0.35 * len(expanded_terms)
+            weighted_hits = len(original_hits) + 0.35 * len(expanded_hits)
+            similarity = weighted_hits / denominator if denominator else 0.0
+            candidate["similarity"] = round(similarity, 3)
+            candidate["matched_terms"] = sorted(original_hits | expanded_hits)
+            if similarity >= similarity_threshold:
+                filtered.append(candidate)
+        filtered.sort(key=lambda item: (item["similarity"], item["search_score"]), reverse=True)
+        passed_threshold_count = len(filtered)
+        dropped_by_threshold_count = len(rewritten_candidates) - passed_threshold_count
+        trimmed_by_top_k_count = max(0, passed_threshold_count - top_k_after)
+
+        return {
+            "original_query": query,
+            "rewritten_query": rewritten_query,
+            "query_rewrite_enabled": query_rewrite_enabled,
+            "top_k_before": top_k_before,
+            "top_k_after": top_k_after,
+            "similarity_threshold": similarity_threshold,
+            "baseline_candidates": baseline_candidates,
+            "baseline_results": baseline_candidates[:top_k_after],
+            "candidates_before_filter": rewritten_candidates,
+            "passed_threshold_count": passed_threshold_count,
+            "dropped_by_threshold_count": dropped_by_threshold_count,
+            "trimmed_by_top_k_count": trimmed_by_top_k_count,
+            "filtered_results": filtered[:top_k_after],
+        }
+
     def search(
         self,
         query: str,
         strategy: str = "all",
         source_prefix: str | None = None,
+        limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """Семантический/текстовый поиск по индексу с учетом стратегии."""
-        if not INDEX_FILE.exists():
-            self.build_index()
-
-        try:
-            data = json.loads(INDEX_FILE.read_text(encoding="utf-8"))
-            all_chunks = data.get("chunks", [])
-        except Exception:
-            all_chunks = self.chunks
-
-        q_words = set(query.lower().split())
-        scored = []
-
-        for c in all_chunks:
-            if strategy != "all" and c.get("strategy") != strategy:
-                continue
-            if source_prefix and not c.get("source", "").startswith(source_prefix):
-                continue
-            text_lower = c["text"].lower()
-            # Простейший подсчет совпадений слов (TF-IDF симуляция)
-            score = sum(1 for w in q_words if w in text_lower)
-            if score > 0:
-                scored.append((score, c))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [item[1] for item in scored[:10]]
+        """Return lexical matches ranked by normalized meaningful-token overlap."""
+        return self._rank(query, source_prefix, limit=max(0, int(limit)), strategy=strategy)
 
     def compare_strategies(self) -> Dict[str, Any]:
         """Возвращает детальный отчет сравнения Fixed Size и Structural стратегий."""

@@ -491,6 +491,13 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
         top_k: topKSlider.value
       };
 
+      if (document.getElementById('ragRewriteEnabled')) {
+        config.rag_query_rewrite_enabled = document.getElementById('ragRewriteEnabled').checked;
+        config.rag_top_k_before = document.getElementById('ragTopKBefore').value;
+        config.rag_top_k_after = document.getElementById('ragTopKAfter').value;
+        config.rag_similarity_threshold = document.getElementById('ragSimilarityThreshold').value;
+      }
+
       // Сбор дополнительных чекбоксов (если есть)
       document.querySelectorAll('.sidebar input[type="checkbox"]').forEach(cb => {
         config[cb.id] = cb.checked;
@@ -538,6 +545,13 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
         top_p: topPSlider.value,
         top_k: topKSlider.value
       };
+
+      if (document.getElementById('ragRewriteEnabled')) {
+        config.rag_query_rewrite_enabled = document.getElementById('ragRewriteEnabled').checked;
+        config.rag_top_k_before = document.getElementById('ragTopKBefore').value;
+        config.rag_top_k_after = document.getElementById('ragTopKAfter').value;
+        config.rag_similarity_threshold = document.getElementById('ragSimilarityThreshold').value;
+      }
 
       document.querySelectorAll('.sidebar input[type="checkbox"]').forEach(cb => {
         config[cb.id] = cb.checked;
