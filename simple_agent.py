@@ -5,6 +5,25 @@ import urllib.request
 import urllib.error
 
 
+def _openrouter_request_with_retry(request, timeout=120, max_retries=2):
+    """Retry transient OpenRouter rate limits without duplicating chat history."""
+    for attempt in range(max_retries + 1):
+        try:
+            return urllib.request.urlopen(request, timeout=timeout)
+        except urllib.error.HTTPError as error:
+            if error.code != 429 or attempt >= max_retries:
+                raise
+            retry_after = error.headers.get("Retry-After") if error.headers else None
+            try:
+                delay = min(8.0, max(1.0, float(retry_after))) if retry_after else 1.5 * (attempt + 1)
+            except (TypeError, ValueError):
+                delay = 1.5 * (attempt + 1)
+            error.read()
+            error.close()
+            print(f"[OpenRouter] Rate limited; retrying in {delay:.1f}s ({attempt + 1}/{max_retries}).")
+            time.sleep(delay)
+
+
 def _quote_from_chunk(chunk: dict, max_chars: int = 360) -> str:
     """Return a verbatim, compact excerpt from a retrieved chunk."""
     text = str(chunk.get("text", "")).strip()
@@ -55,7 +74,7 @@ LEGACY_DEFAULT_INVARIANTS = {
 class SimpleAgent:
     MODEL_DEFAULT = "openrouter/free"
     WINDOW_SIZE = 6
-    FAST_MODEL = "cohere/north-mini-code:free"
+    FAST_MODEL = "openrouter/free"
 
     # День 15: Определение разрешенных переходов конечного автомата
     TSM_ALLOWED_TRANSITIONS = {
@@ -73,6 +92,7 @@ class SimpleAgent:
         self.history = []
         self.system_prompt = "Ты — полезный AI-ассистент."
         self.model = self.MODEL_DEFAULT
+        self.model_supported_parameters = ["temperature", "top_p", "top_k"]
         self.temperature = 0.7
         self.top_p = 1.0
         self.top_k = 0
@@ -89,6 +109,7 @@ class SimpleAgent:
         # Трехуровневая система памяти
         self.wm = {}   # Working Memory: текущая задача, активный контекст
         self.ltm = {}  # Long-Term Memory: глобальные факты, предпочтения
+        self.task_state = {"goal": "", "clarifications": [], "constraints": [], "terms": {}}
 
         # День 12: Система персонализации и профилей пользователей
         self.current_profile = "Android Developer"
@@ -134,6 +155,7 @@ class SimpleAgent:
             "saved_tokens": self.saved_tokens,
             "wm": self.wm,
             "ltm": self.ltm,
+            "task_state": self.task_state,
             "current_profile": self.current_profile,
             "profiles": self.profiles,
             "tsm": {
@@ -145,6 +167,7 @@ class SimpleAgent:
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,
+                "model_supported_parameters": self.model_supported_parameters,
                 "temperature": self.temperature,
                 "top_p": self.top_p,
                 "top_k": self.top_k,
@@ -179,6 +202,14 @@ class SimpleAgent:
                 self.saved_tokens = state.get("saved_tokens", 0)
                 self.wm = state.get("wm", {})
                 self.ltm = state.get("ltm", {})
+                saved_task_state = state.get("task_state", {})
+                if isinstance(saved_task_state, dict):
+                    self.task_state = {
+                        "goal": str(saved_task_state.get("goal", ""))[:500],
+                        "clarifications": [str(v)[:300] for v in saved_task_state.get("clarifications", []) if isinstance(v, str)][-20:],
+                        "constraints": [str(v)[:300] for v in saved_task_state.get("constraints", []) if isinstance(v, str)][-20:],
+                        "terms": {str(k)[:100]: str(v)[:200] for k, v in saved_task_state.get("terms", {}).items() if isinstance(v, str)} if isinstance(saved_task_state.get("terms", {}), dict) else {},
+                    }
                 self.history = state.get("history", [])
 
                 if "current_profile" in state:
@@ -204,6 +235,7 @@ class SimpleAgent:
                 config = state.get("config", {})
                 self.system_prompt = config.get("system_prompt", self.system_prompt)
                 self.model = config.get("model", self.model)
+                self.model_supported_parameters = config.get("model_supported_parameters", self.model_supported_parameters)
                 self.temperature = config.get("temperature", self.temperature)
                 self.top_p = config.get("top_p", self.top_p)
                 self.top_k = config.get("top_k", self.top_k)
@@ -229,6 +261,8 @@ class SimpleAgent:
     def set_config(self, config: dict):
         self.system_prompt = config.get("system_prompt", self.system_prompt)
         self.model = config.get("model", self.model)
+        if "model_supported_parameters" in config:
+            self.model_supported_parameters = config["model_supported_parameters"]
         self.temperature = float(config.get("temperature", self.temperature))
         self.top_p = float(config.get("top_p", self.top_p))
         self.top_k = int(config.get("top_k", self.top_k))
@@ -257,6 +291,7 @@ class SimpleAgent:
         if clear_all:
             self.wm = {}
             self.ltm = {}
+            self.task_state = {"goal": "", "clarifications": [], "constraints": [], "terms": {}}
             self.tsm_stage = "none"
             self.tsm_step = "Нет активной задачи"
             self.tsm_action = "Ожидание постановки задачи пользователем"
@@ -264,6 +299,10 @@ class SimpleAgent:
             self.invariants_enabled = False
             self.summary_context = ""
             self.saved_tokens = 0
+        self._save_state()
+
+    def reset_task_state(self):
+        self.task_state = {"goal": "", "clarifications": [], "constraints": [], "terms": {}}
         self._save_state()
 
     def pin_to_ltm(self, key: str, value: str):
@@ -326,10 +365,12 @@ class SimpleAgent:
 
         prompt = (
             "Ты — менеджер многоуровневой памяти и контроллер конечного автомата задач (TSM) ИИ-агента.\n"
-            "Твоя задача — проанализировать последний обмен сообщениями и обновить три структуры данных:\n"
+            "Твоя задача — проанализировать последний обмен сообщениями и обновить четыре структуры данных:\n"
             "1. Long-Term Memory (LTM): глобальные, постоянные факты.\n"
             "2. Working Memory (WM): блок активных данных текущей задачи.\n"
             "3. Task State Machine (TSM): текущее состояние конечного автомата.\n"
+            "4. Память задачи: цель разговора, уточнения пользователя, ограничения и устойчивые термины.\n"
+            "Сохраняй только явно сообщённое или подтверждённое пользователем. Сохраняй старые уточнения; меняй цель лишь при явной смене задачи.\n"
             "   ДОСТУПНЫЕ ЭТАПЫ (stage):\n"
             "   - \"none\": задача еще не поставлена.\n"
             "   - \"planning\": обсуждение архитектуры и составление плана.\n"
@@ -342,6 +383,7 @@ class SimpleAgent:
             "   Ты НЕ ИМЕЕШЬ ПРАВА перепрыгивать этапы. Например, нельзя перейти в 'execution', если сейчас 'none' или 'planning' еще не завершен.\n\n"
             f"Текущая LTM: {json.dumps(self.ltm, ensure_ascii=False)}\n"
             f"Текущая WM: {json.dumps(self.wm, ensure_ascii=False)}\n"
+            f"Текущее состояние задачи: {json.dumps(self.task_state, ensure_ascii=False)}\n"
             f"Текущее состояние TSM: stage=\"{self.tsm_stage}\", step=\"{self.tsm_step}\", action=\"{self.tsm_action}\"\n\n"
             "Последний диалог:\n"
             f"User: {user_msg}\n"
@@ -350,6 +392,7 @@ class SimpleAgent:
             "{\n"
             "  \"ltm\": { ... },\n"
             "  \"wm\": { ... },\n"
+            "  \"task_state\": {\"goal\": \"...\", \"clarifications\": [], \"constraints\": [], \"terms\": {}},\n"
             "  \"tsm\": {\n"
             "     \"stage\": \"... строго из списка разрешенных или текущий ...\",\n"
             "     \"step\": \"... описание текущего шага ...\",\n"
@@ -389,6 +432,32 @@ class SimpleAgent:
                     memory_data = json.loads(content)
                     if "ltm" in memory_data: self.ltm = memory_data["ltm"]
                     if "wm" in memory_data: self.wm = memory_data["wm"]
+                    incoming_task_state = memory_data.get("task_state")
+                    if isinstance(incoming_task_state, dict):
+                        current = self.task_state
+                        incoming_goal = incoming_task_state.get("goal")
+                        if isinstance(incoming_goal, str) and incoming_goal.strip():
+                            current["goal"] = incoming_goal.strip()[:500]
+                        for field in ("clarifications", "constraints"):
+                            existing = current.get(field, []) if isinstance(current.get(field), list) else []
+                            incoming = incoming_task_state.get(field, [])
+                            if isinstance(incoming, list):
+                                merged = list(dict.fromkeys(
+                                    str(value).strip()[:300]
+                                    for value in existing + incoming
+                                    if str(value).strip()
+                                ))
+                                current[field] = merged[-20:]
+                        existing_terms = current.get("terms", {}) if isinstance(current.get("terms"), dict) else {}
+                        incoming_terms = incoming_task_state.get("terms", {})
+                        if isinstance(incoming_terms, dict):
+                            existing_terms.update({
+                                str(key)[:100]: str(value).strip()[:200]
+                                for key, value in incoming_terms.items()
+                                if isinstance(value, str) and value.strip()
+                            })
+                        current["terms"] = existing_terms
+                        self.task_state = current
                     if "tsm" in memory_data:
                         tsm_res = memory_data["tsm"]
                         new_stage = tsm_res.get("stage", self.tsm_stage)
@@ -506,6 +575,18 @@ class SimpleAgent:
             wm_str = "\n".join([f"- {k}: {v}" for k, v in self.wm.items()])
             messages.append({"role": "system", "content": f"=== WORKING MEMORY (WM) ===\n{wm_str}"})
 
+        if self.task_state.get("goal") or self.task_state.get("clarifications") or self.task_state.get("constraints") or self.task_state.get("terms"):
+            messages.append({
+                "role": "system",
+                "content": (
+                    "=== ПАМЯТЬ ТЕКУЩЕЙ ЗАДАЧИ ===\n"
+                    f"{json.dumps(self.task_state, ensure_ascii=False)}\n"
+                    "Это подтверждённый контекст разговора. Не проси повторять уже указанные сведения. "
+                    "Учитывай цель, уточнения, ограничения и зафиксированные термины при ответе.\n"
+                    "================================"
+                ),
+            })
+
         # RAG Context Retrieval (если режим RAG ВКЛЮЧЕН)
         rag_evidence_chunks = []
         if self.rag_mode_enabled:
@@ -514,8 +595,14 @@ class SimpleAgent:
                 if rag_chunks is not None:
                     matches = rag_chunks
                 else:
-                    retrieval = DocumentIndexer().compare_retrieval(
+                    task_terms = " ".join(str(value) for value in self.task_state.get("terms", {}).values())
+                    retrieval_query = " ".join(filter(None, [
                         user_message,
+                        self.task_state.get("goal", ""),
+                        task_terms,
+                    ]))
+                    retrieval = DocumentIndexer().compare_retrieval(
+                        retrieval_query,
                         source_prefix=rag_source_prefix,
                         top_k_before=self.rag_top_k_before,
                         top_k_after=self.rag_top_k_after,
@@ -562,12 +649,14 @@ class SimpleAgent:
                 "Не знаю по найденным документам: релевантных фрагментов выше порога "
                 f"{self.rag_similarity_threshold:.2f} не найдено. Уточните вопрос или проверьте базу знаний."
             )
-            conversation_history.append({"role": "assistant", "content": answer, "model": self.model})
+            no_source_evidence = "### Источники и цитаты\nПоиск выполнялся, но фрагментов выше заданного порога не найдено; подтвердить ответ цитатами нельзя."
+            conversation_history.append({"role": "assistant", "content": answer, "rag_evidence": no_source_evidence, "model": self.model})
             if persist_state:
                 self._save_state()
             return {
                 "role": "assistant",
                 "content": answer,
+                "rag_evidence": no_source_evidence,
                 "model": self.model,
                 "time": 0,
                 "usage": {},
@@ -607,11 +696,16 @@ class SimpleAgent:
         body = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
             "max_tokens": 2000,
             "plugins": [{"id": "context-compression", "enabled": self.context_compression}]
         }
+        supported = self.model_supported_parameters
+        if not supported or "temperature" in supported:
+            body["temperature"] = self.temperature
+        if not supported or "top_p" in supported:
+            body["top_p"] = self.top_p
+        if self.top_k > 0 and (not supported or "top_k" in supported):
+            body["top_k"] = self.top_k
 
         if openai_tools:
             body["tools"] = openai_tools
@@ -627,7 +721,7 @@ class SimpleAgent:
         start_time = time.time()
         try:
             req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=120) as res:
+            with _openrouter_request_with_retry(req, timeout=120) as res:
                 raw_response = res.read().decode("utf-8")
                 elapsed = time.time() - start_time
                 resp_data = json.loads(raw_response)
@@ -692,6 +786,8 @@ class SimpleAgent:
 
                     if self.rag_mode_enabled and rag_evidence_chunks:
                         rag_evidence = format_rag_evidence(rag_evidence_chunks)
+                    elif not self.rag_mode_enabled:
+                        rag_evidence = "### Источники и цитаты\nПоиск по документам отключён для этого ответа; источники не запрашивались."
                     else:
                         rag_evidence = ""
 
@@ -719,28 +815,45 @@ class SimpleAgent:
                     }
                 return {"error": f"API Error: {json.dumps(resp_data)}"}
         except urllib.error.HTTPError as e:
+            if conversation_history and conversation_history[-1].get("role") == "user" and conversation_history[-1].get("content") == user_message:
+                conversation_history.pop()
+                if persist_state:
+                    self._save_state()
             try: return {"error": f"OpenRouter Error {e.code}: {json.loads(e.read().decode('utf-8')).get('error', {}).get('message')}"}
             except: return {"error": f"HTTP Error {e.code}: {str(e)}"}
         except Exception as e:
+            if conversation_history and conversation_history[-1].get("role") == "user" and conversation_history[-1].get("content") == user_message:
+                conversation_history.pop()
+                if persist_state:
+                    self._save_state()
             return {"error": str(e)}
 
     def get_token_stats(self) -> dict:
         total = 0
         last_prompt = 0
+        estimated_cost = 0.0
         for msg in self.history:
             if msg.get("role") == "assistant" and "usage" in msg:
-                total += msg["usage"].get("total_tokens", 0)
-                last_prompt = msg["usage"].get("prompt_tokens", 0)
-        cost = (total / 1000000) * 0.15
+                usage = msg.get("usage") or {}
+                total += usage.get("total_tokens", 0)
+                last_prompt = usage.get("prompt_tokens", 0)
+                if usage.get("cost") is not None:
+                    try:
+                        estimated_cost += float(usage["cost"])
+                    except (TypeError, ValueError):
+                        estimated_cost += (usage.get("total_tokens", 0) / 1000000) * 0.15
+                else:
+                    estimated_cost += (usage.get("total_tokens", 0) / 1000000) * 0.15
         return {
             "total_tokens": total,
             "last_prompt_tokens": last_prompt,
-            "cost": round(cost, 6),
+            "cost": round(estimated_cost, 6),
             "history_len": len(self.history),
             "summary_context": self.summary_context,
             "saved_tokens": self.saved_tokens,
             "wm": self.wm,
             "ltm": self.ltm,
+            "task_state": self.task_state,
             "current_profile": self.current_profile,
             "tsm_stage": self.tsm_stage,
             "tsm_step": self.tsm_step,
@@ -755,6 +868,7 @@ class SimpleAgent:
             "saved_tokens": self.saved_tokens,
             "wm": self.wm,
             "ltm": self.ltm,
+            "task_state": self.task_state,
             "current_profile": self.current_profile,
             "profiles_list": list(self.profiles.keys()),
             "current_profile_data": self.profiles.get(self.current_profile, {}),
@@ -768,6 +882,7 @@ class SimpleAgent:
             "config": {
                 "system_prompt": self.system_prompt,
                 "model": self.model,
+                "model_supported_parameters": self.model_supported_parameters,
                 "temperature": self.temperature,
                 "top_p": self.top_p,
                 "top_k": self.top_k,

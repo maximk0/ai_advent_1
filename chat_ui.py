@@ -69,6 +69,10 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
       font-size: 0.9rem;
     }
     .config-group textarea { min-height: 100px; resize: vertical; }
+    .sidebar-disclosure { margin: 0 0 16px; border-top: 1px solid var(--border); padding-top: 10px; }
+    .sidebar-disclosure > summary { cursor: pointer; color: var(--text-main); font-size: .85rem; font-weight: 700; }
+    .generation-controls { display: flex; flex-direction: column; gap: 5px; margin-top: 10px; }
+    .control-help { margin: -2px 0 7px; color: var(--text-dim); font-size: .68rem; line-height: 1.35; }
 
     .checkbox-group {
       display: flex;
@@ -100,6 +104,10 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
     #comparisonView { display: none; flex: 1; min-height: 0; overflow-y: auto; padding: 24px; }
 
     /* Chat Area */
+    .scenario-practice { margin: 8px 20px 0; padding: 10px 12px; background: rgba(56,189,248,.07); border: 1px solid rgba(56,189,248,.25); border-radius: 8px; }
+    .scenario-practice summary { cursor: pointer; font-size: .82rem; font-weight: 700; }
+    .scenario-practice button, .scenario-practice select { margin-top: 7px; padding: 7px; border-radius: 6px; background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); }
+    .scenario-practice p { margin: 6px 0; color: var(--text-dim); font-size: .75rem; line-height: 1.4; }
     #chat-log {
       flex: 1;
       overflow-y: auto;
@@ -342,45 +350,39 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
     <div class="config-group">
       <label>Модель (OpenRouter)</label>
       <select id="modelSelect">
-        <option value="openrouter/free" selected>Auto (Router Free)</option>
-        <option value="openai/gpt-4o-mini">GPT-4o mini</option>
-        <option value="google/gemma-4-31b-it:free">Gemma 4 31B (free)</option>
-        <option value="google/gemma-4-26b-a4b-it:free">Gemma 4 26B A4B (free)</option>
-        <option value="nvidia/nemotron-3-ultra-550b-a55b:free">Nemotron 3 Ultra (free)</option>
-        <option value="nvidia/nemotron-3.5-lightning:free">Nemotron 3.5 Lightning (free)</option>
-        <option value="minimax/minimax-m3:free">MiniMax M3 (free)</option>
-        <option value="minimax/minimax-m2.7:free">MiniMax M2.7 (free)</option>
-        <option value="z-ai/glm-5.2:free">GLM 5.2 (free)</option>
-        <option value="liquid/lfm-2.5-2.6b:free">LiquidAI LFM2.5 2.6B (free)</option>
-        <option value="thinkingmachines/inkling-small:free">Inkling Small (free)</option>
-        <option value="poolside/laguna-s-2.1:free">Laguna S 2.1 (free)</option>
-        <option value="poolside/laguna-xs-2.1:free">Laguna XS 2.1 (free)</option>
-        <option value="cohere/north-mini-code:free">North Mini Code (free)</option>
-        <option value="ling/ling-3.0-flash-fin:free">Ling 3.0 Flash Fin (free)</option>
-        <option value="dots/dots3-note-preview:free">Dots Studio: Dots3-Note Preview (free)</option>
+        <option value="openrouter/free" selected data-supported-parameters='["temperature","top_p","top_k"]'>OpenRouter Free (автовыбор доступной модели)</option>
+        <option value="z-ai/glm-4.5" data-supported-parameters='["temperature","top_p","top_k"]'>Z.ai GLM 4.5 · $0.60/M вход · $2.20/M выход</option>
+        <option value="openai/gpt-4o-mini" data-supported-parameters='["temperature","top_p","top_k"]'>OpenAI GPT-4o mini · $0.15/M вход · $0.60/M выход</option>
+        <option value="meta-llama/llama-3.2-3b-instruct:free" data-supported-parameters='["temperature","top_p","top_k"]'>Meta Llama 3.2 3B Instruct (free)</option>
+        <option value="qwen/qwen3.6-flash" data-supported-parameters='["temperature","top_p","top_k"]'>Qwen3.6 Flash · $0.1875/M вход · $1.125/M выход</option>
+        <option value="x-ai/grok-stt-1.0" disabled title="Требуется отдельный режим распознавания аудио; этот пункт не предназначен для текстового чата">x-ai/Grok STT 1.0 · $0.10/час · только распознавание аудио</option>
+        <option value="nvidia/nemotron-3-ultra-550b-a55b-20260604:free" data-supported-parameters='[]'>NVIDIA Nemotron 3 Ultra (free) · nvidia/nemotron-3-ultra-550b-a55b-20260604:free</option>
+        <option value="poolside/laguna-s-2.1:free" data-supported-parameters='[]'>Poolside Laguna S 2.1 (free) · poolside/laguna-s-2.1:free</option>
+        <option value="nvidia/nemotron-3.5-lightning:free" data-supported-parameters='[]'>NVIDIA Nemotron 3.5 Lightning (free) · nvidia/nemotron-3.5-lightning:free</option>
       </select>
+      <div class="control-help">Бесплатные модели загружаются из каталога OpenRouter; избранные модели показаны отдельно с ценой. Grok STT распознаёт аудио и не работает как текстовый чат.</div>
     </div>
 
-    <div class="config-group">
-      <label>Temperature: <span id="tempVal" class="slider-val">0.7</span></label>
-      <div class="slider-container">
-        <input type="range" id="tempSlider" min="0" max="2" step="0.1" value="0.7">
+    <details class="sidebar-disclosure">
+      <summary>Параметры генерации</summary>
+      <div class="generation-controls">
+        <div class="config-group">
+          <label>Температура: <span id="tempVal" class="slider-val">0.7</span></label>
+          <div class="slider-container"><input type="range" id="tempSlider" min="0" max="2" step="0.1" value="0.7"></div>
+          <div class="control-help">Ниже — ответы стабильнее, выше — разнообразнее. Для точных ответов обычно используют невысокую температуру.</div>
+        </div>
+        <div class="config-group">
+          <label>Top P: <span id="topPVal" class="slider-val">1.0</span></label>
+          <div class="slider-container"><input type="range" id="topPSlider" min="0" max="1" step="0.05" value="1.0"></div>
+          <div class="control-help">Ограничивает выбор наиболее вероятными продолжениями. Обычно оставляют 1.0, если настраивают температуру.</div>
+        </div>
+        <div class="config-group">
+          <label>Top K: <span id="topKVal" class="slider-val">0</span></label>
+          <div class="slider-container"><input type="range" id="topKSlider" min="0" max="100" step="1" value="0"></div>
+          <div class="control-help">Оставляет для выбора K наиболее вероятных токенов. Ноль передаёт выбор провайдеру; часть моделей не поддерживает параметр.</div>
+        </div>
       </div>
-    </div>
-
-    <div class="config-group">
-      <label>Top P: <span id="topPVal" class="slider-val">1.0</span></label>
-      <div class="slider-container">
-        <input type="range" id="topPSlider" min="0" max="1" step="0.05" value="1.0">
-      </div>
-    </div>
-
-    <div class="config-group">
-      <label>Top K: <span id="topKVal" class="slider-val">0</span></label>
-      <div class="slider-container">
-        <input type="range" id="topKSlider" min="0" max="100" step="1" value="0">
-      </div>
-    </div>
+    </details>
 
     {{EXTRA_SIDEBAR_HTML}}
 
@@ -526,6 +528,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
 
       addMessage('user', text);
 
+
       const loadingMsg = addMessage('bot', null);
 
       sendBtn.disabled = true;
@@ -534,6 +537,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
       const config = {
         system_prompt: document.getElementById('sysPrompt').value,
         model: document.getElementById('modelSelect').value,
+        model_supported_parameters: JSON.parse(document.getElementById('modelSelect').selectedOptions[0]?.dataset.supportedParameters || '[]'),
         temperature: tempSlider.value,
         top_p: topPSlider.value,
         top_k: topKSlider.value
@@ -590,6 +594,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
       const config = {
         system_prompt: document.getElementById('sysPrompt').value,
         model: document.getElementById('modelSelect').value,
+        model_supported_parameters: JSON.parse(document.getElementById('modelSelect').selectedOptions[0]?.dataset.supportedParameters || '[]'),
         temperature: tempSlider.value,
         top_p: topPSlider.value,
         top_k: topKSlider.value

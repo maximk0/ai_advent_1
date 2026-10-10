@@ -13,6 +13,8 @@ import time
 import threading
 import copy
 import uuid
+import urllib.request
+import urllib.error
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,6 +28,40 @@ PORT = 8001
 _LOCK = threading.Lock()
 _EVALUATION_LOCK = threading.Lock()
 _EVALUATIONS = {}
+_FREE_MODELS_CACHE = {"expires": 0, "models": []}
+_FREE_MODELS_FALLBACK = [
+    {"id": "nvidia/nemotron-3-ultra-550b-a55b-20260604:free", "name": "NVIDIA Nemotron 3 Ultra (free)"},
+    {"id": "poolside/laguna-s-2.1:free", "name": "Poolside Laguna S 2.1 (free)"},
+    {"id": "nvidia/nemotron-3.5-lightning:free", "name": "NVIDIA Nemotron 3.5 Lightning (free)"},
+]
+_FEATURED_OPENROUTER_MODELS = [
+    {
+        "id": "z-ai/glm-4.5",
+        "name": "Z.ai GLM 4.5 · $0.60/M вход · $2.20/M выход",
+        "supported_parameters": ["temperature", "top_p", "top_k"],
+    },
+    {
+        "id": "openai/gpt-4o-mini",
+        "name": "OpenAI GPT-4o mini · $0.15/M вход · $0.60/M выход",
+        "supported_parameters": ["temperature", "top_p", "top_k"],
+    },
+    {
+        "id": "meta-llama/llama-3.2-3b-instruct:free",
+        "name": "Meta Llama 3.2 3B Instruct (free)",
+        "supported_parameters": ["temperature", "top_p", "top_k"],
+    },
+    {
+        "id": "qwen/qwen3.6-flash",
+        "name": "Qwen3.6 Flash · $0.1875/M вход · $1.125/M выход",
+        "supported_parameters": ["temperature", "top_p", "top_k"],
+    },
+]
+_NON_CHAT_MODELS = [{
+    "id": "x-ai/grok-stt-1.0",
+    "name": "x-ai/Grok STT 1.0 · $0.10/час · только распознавание аудио",
+    "supported_parameters": [],
+    "chat_supported": False,
+}]
 
 
 def _normalize_for_check(text: str) -> str:
@@ -403,6 +439,63 @@ def _run_rag_comparison(
 # Инициализируем Агента
 agent = SimpleAgent()
 
+
+def _get_free_openrouter_models() -> list[dict]:
+    """Fetch OpenRouter's current free text models; cache briefly to avoid UI delays."""
+    now = time.time()
+    if _FREE_MODELS_CACHE["expires"] > now and _FREE_MODELS_CACHE["models"]:
+        return _FREE_MODELS_CACHE["models"]
+    models = [{
+        "id": "openrouter/free",
+        "name": "OpenRouter Free (автовыбор доступной модели)",
+        "supported_parameters": ["temperature", "top_p", "top_k"],
+    }, *_FEATURED_OPENROUTER_MODELS, *_NON_CHAT_MODELS, *[
+        {**item, "supported_parameters": []}
+        for item in _FREE_MODELS_FALLBACK
+    ]]
+    try:
+        request = urllib.request.Request(
+            "https://openrouter.ai/api/v1/models?output_modalities=text&sort=top-weekly",
+            headers={"Accept": "application/json"},
+        )
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        if api_key:
+            request.add_header("Authorization", f"Bearer {api_key}")
+        with urllib.request.urlopen(request, timeout=12) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        known_ids = {item["id"] for item in models}
+        for item in payload.get("data", []):
+            pricing = item.get("pricing") or {}
+            architecture = item.get("architecture") or {}
+            modalities = architecture.get("output_modalities") or item.get("output_modalities") or []
+            try:
+                is_free = float(pricing.get("prompt", 1)) == 0 and float(pricing.get("completion", 1)) == 0
+            except (TypeError, ValueError):
+                is_free = False
+            model_id = item.get("id", "")
+            if is_free and "text" in modalities and model_id and model_id not in known_ids:
+                models.append({
+                    "id": model_id,
+                    "name": item.get("name") or model_id,
+                    "supported_parameters": item.get("supported_parameters", []),
+                })
+                known_ids.add(model_id)
+        # Prefer live catalog data, but never leave the model picker with only
+        # the router if OpenRouter changes the catalog response shape.
+        for item in _FEATURED_OPENROUTER_MODELS:
+            if item["id"] not in known_ids:
+                models.insert(1, item)
+                known_ids.add(item["id"])
+        for item in _FREE_MODELS_FALLBACK:
+            if item["id"] not in known_ids:
+                models.append({**item, "supported_parameters": []})
+        # Keep router first, then current catalog order (OpenRouter returns most popular first).
+        models = models[:64]
+    except Exception as exc:
+        print(f"OpenRouter model catalogue unavailable; using built-in model choices: {exc}")
+    _FREE_MODELS_CACHE.update({"expires": now + 600, "models": models})
+    return models
+
 # Инициализируем MCP клиенты
 indexer_client = MCPClient(ROOT / "mcp_server_indexer.py")
 pipeline_client = MCPClient(ROOT / "mcp_server_pipeline.py")
@@ -471,8 +564,8 @@ SIDEBAR_STATS_HTML = """
 </div>
 
 <!-- 3. ПЕРСОНАЛИЗАЦИЯ И ПРОФИЛИ -->
-<div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
-  <label style="font-weight: 600; display: block; margin-bottom: 5px; font-size: 0.85rem; color: #a855f7;">🎭 Персонализация и Профили:</label>
+<details class="sidebar-disclosure"><summary>🎭 Персонализация и профили</summary>
+<div class="config-group" style="margin-top: 12px;">
   <select id="profileSelect" class="input-field" style="font-size: 0.8rem; margin-bottom: 8px;"></select>
   <div id="profileDetailsBlock" style="background: rgba(255,255,255,0.03); border: 1px solid var(--border); padding: 8px; border-radius: 6px; font-size: 0.75rem; display: flex; flex-direction: column; gap: 4px;">
     <div><b style="color: var(--accent);">Роль:</b> <span id="profRole" style="color: var(--text-main);"></span></div>
@@ -497,9 +590,23 @@ SIDEBAR_STATS_HTML = """
     </div>
   </div>
 </div>
+</details>
 
-<!-- 4. LONG-TERM MEMORY (LTM) -->
+<!-- 4. ПАМЯТЬ ЗАДАЧИ -->
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
+  <label style="font-weight: 600; display: block; margin-bottom: 5px; font-size: 0.85rem; color: #38bdf8;">🎯 Память текущей задачи:</label>
+  <div style="font-size:.72rem; line-height:1.45; color:var(--text-dim);">
+    <b>Цель:</b> <span id="taskGoal">Пока не зафиксирована</span>
+    <div style="margin-top:5px"><b>Уточнения:</b><ul id="taskClarifications" style="margin:3px 0 6px; padding-left:17px"></ul></div>
+    <div><b>Ограничения:</b><ul id="taskConstraints" style="margin:3px 0 6px; padding-left:17px"></ul></div>
+    <div><b>Термины:</b><ul id="taskTerms" style="margin:3px 0 6px; padding-left:17px"></ul></div>
+  </div>
+  <button onclick="resetTaskState()" style="padding:5px; font-size:.7rem; background:rgba(56,189,248,.12); border:1px solid rgba(56,189,248,.4); border-radius:5px; color:#bae6fd; cursor:pointer">Сбросить память задачи</button>
+</div>
+
+<details class="sidebar-disclosure"><summary>🧠 Управление памятью</summary>
+<!-- 4. LONG-TERM MEMORY (LTM) -->
+<div class="config-group" style="margin-top: 15px;">
   <label style="font-weight: 600; display: block; margin-bottom: 5px; font-size: 0.85rem; color: #4ade80;">🧠 Long-Term Memory (LTM):</label>
   <div id="ltmList" style="font-size: 0.75rem; color: var(--text-dim); background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; line-height: 1.4; max-height: 100px; overflow-y: auto; margin-bottom: 8px;">
     Нет долговременных фактов
@@ -514,23 +621,19 @@ SIDEBAR_STATS_HTML = """
 <!-- 5. WORKING MEMORY (WM) -->
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
   <label style="font-weight: 600; display: block; margin-bottom: 5px; font-size: 0.85rem; color: #fbbf24;">🛠 Working Memory (WM):</label>
-  <div id="wmList" style="font-size: 0.75rem; color: var(--text-dim); background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; line-height: 1.4; max-height: 100px; overflow-y: auto;">
+<div id="wmList" style="font-size: 0.75rem; color: var(--text-dim); background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; line-height: 1.4; max-height: 100px; overflow-y: auto;">
     Нет активных данных задачи
   </div>
 </div>
+</details>
 
 <!-- RAG settings for both the ordinary chat and comparison. -->
 <div class="config-group" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 10px;">
-  <label style="font-weight: 600; display: block; margin-bottom: 8px; font-size: 0.85rem; color: #f43f5e;">🔬 RAG:</label>
-  <label class="checkbox-group" style="margin: 0 0 8px; cursor: pointer; color: #c4b5fd; font-size: 0.75rem; display: flex; align-items: center; gap: 6px;">
-    <input type="checkbox" id="rag_settings_visible" onchange="toggleRagSettings(this.checked)">
-    <b>Показать настройки RAG</b>
+  <label class="checkbox-group" style="margin: 0 0 8px; cursor: pointer; color: #fda4af; font-size: 0.8rem; display: flex; align-items: center; gap: 6px; text-transform:none;">
+    <input type="checkbox" id="rag_mode_enabled" checked onchange="toggleRagMode(this.checked)">
+    <b>Включать поиск по документам (RAG)</b>
   </label>
   <div id="ragSettingsControls" style="display: none; flex-direction: column; gap: 8px; padding: 9px; background: rgba(0,0,0,.2); border: 1px solid var(--border); border-radius: 7px;">
-    <label class="checkbox-group" style="margin: 0; cursor: pointer; color: #fda4af; font-size: 0.75rem; display: flex; align-items: center; gap: 6px;">
-      <input type="checkbox" id="rag_mode_enabled" checked onchange="toggleRagMode(this.checked)">
-      <b>Включить поиск по документам (RAG)</b>
-    </label>
     <label class="checkbox-group" style="margin: 0; cursor: pointer; color: var(--text-dim); font-size: 0.75rem; display: flex; align-items: center; gap: 6px;">
       <input type="checkbox" id="ragRewriteEnabled" checked>
       <b>Переписывать запрос эвристически</b>
@@ -560,9 +663,9 @@ SIDEBAR_STATS_HTML = """
   </div>
 </div>
 
-<div style="margin-top: 15px; display: flex; flex-direction: column; gap: 8px;">
-  <button onclick="clearChat()" style="width: 100%; padding: 8px; background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.8rem; transition: background 0.2s;">🧹 Очистить историю чата</button>
-  <button onclick="resetAllData()" style="width: 100%; padding: 8px; background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.8rem; transition: background 0.2s;">🚨 Сбросить все данные памяти</button>
+<div style="margin: 0 0 15px; display: flex; flex-direction: column; gap: 8px;">
+  <button onclick="clearChat()" style="width: 100%; padding: 8px; background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.8rem;">🧹 Очистить диалог</button>
+  <button onclick="resetAllData()" style="width: 100%; padding: 8px; background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.8rem;">🚨 Очистить все настройки и память</button>
 </div>
 
 <style>
@@ -582,105 +685,65 @@ SIDEBAR_STATS_HTML = """
 COMPARISON_VIEW_HTML = """
 <nav class="main-tabs" aria-label="Режимы приложения">
   <button id="chatTab" class="main-tab active" type="button" onclick="showAppView('chat')">Чат</button>
-  <button id="comparisonTab" class="main-tab" type="button" onclick="showAppView('comparison')">Сравнение</button>
+  <button id="comparisonTab" class="main-tab" type="button" onclick="showAppView('comparison')">Демо</button>
 </nav>
 <section id="comparisonView" aria-labelledby="comparisonTitle">
   <div class="compare-page">
     <header class="compare-header">
       <div>
-        <h1 id="comparisonTitle">Сравнение ответов</h1>
-        <p>Сравните ответы с RAG и без него. Для ответа с RAG показываются источник, раздел, chunk ID и точная цитата; контрольный прогон проверяет их наличие и поддержку ожидаемых фактов.</p>
+        <h1 id="comparisonTitle">Демо: память задачи и RAG</h1>
+        <p>Пройдите один длинный разговор: поставьте цель, уточните правила, закрепите термины и попросите итог. Проверьте, сохранил ли агент всё это и привёл ли источники.</p>
       </div>
-      <button id="runBenchmarkBtn" class="benchmark-btn" type="button" onclick="runRagEvaluation(this)">Запустить все 10 вопросов</button>
     </header>
 
-    <section class="compare-panel">
+    <section class="compare-panel task-demo-panel">
       <div class="panel-heading">
-        <div><h2>Выберите контрольный вопрос</h2><p>Нажатие сразу запускает сравнение; ожидаемый результат будет показан в отчёте.</p></div>
-        <span id="questionCount" class="subtle-label"></span>
+        <div><h2>Тестовый диалог: отказ датчика T-4</h2><p>6 последовательных сообщений с одной целью. Перед запуском очистится только история чата и память задачи. Настройки, инварианты и долговременная память сохранятся.</p></div>
       </div>
-      <div id="questionBank" class="question-bank"><div class="empty-state">Загружаю вопросы…</div></div>
+      <div class="task-demo-note"><b>Что проверяется:</b> цель разговора, ваши ограничения, значения терминов, финальный чек-лист и наличие источника на каждом ходе. Для проверки источников включите RAG в сайдбаре.</div>
+      <div class="task-demo-controls">
+        <button type="button" id="scenarioStartBtn" class="primary-btn" disabled>Начать демо с чистой историей</button>
+        <button type="button" id="scenarioResetBtn" class="benchmark-btn" disabled>Сбросить демо</button>
+      </div>
+      <div id="taskScenarioProgress" class="task-demo-progress">Загружаю сценарий…</div>
+      <div id="taskScenarioLog" class="task-demo-log" aria-live="polite">
+        <div class="msg-wrapper msg-bot"><div class="msg-bubble">Здесь появится диалог. Нажмите «Начать демо», затем отправляйте сообщения по одному.</div></div>
+      </div>
+      <div class="task-demo-next"><button type="button" id="scenarioStepBtn" class="primary-btn" disabled>Отправить следующий вопрос</button></div>
+      <section id="taskScenarioAudit" class="task-demo-audit" hidden>
+        <h3>Что проверить в конце</h3>
+        <ul id="taskScenarioExpectedMemory"></ul>
+        <h4>Что агент сохранил</h4>
+        <pre id="taskScenarioActualMemory"></pre>
+      </section>
     </section>
 
-    <details class="compare-panel custom-question-panel">
-      <summary>Добавить свой вопрос и ожидание</summary>
-      <div class="custom-question-form">
-        <label for="customQuestion">Вопрос</label>
-        <textarea id="customQuestion" rows="2" placeholder="Например: Сколько воды расходуется за один цикл полива?"></textarea>
-        <label for="customExpected">Ожидаемый результат</label>
-        <textarea id="customExpected" rows="2" placeholder="Какие факты должны попасть в правильный ответ?"></textarea>
-        <button type="button" id="customCompareBtn" class="primary-btn" onclick="runCustomComparison(this)">Сравнить ответы</button>
-      </div>
-    </details>
-
-    <section id="comparisonResult" class="compare-panel result-panel" aria-live="polite">
-      <div id="comparisonEmpty" class="empty-state">Выберите вопрос выше или добавьте свой — здесь появятся ожидаемый результат, ответы и их саммари.</div>
-      <div id="comparisonLoading" class="comparison-loading" hidden>
-        <div class="loader"></div>
-        <div><h2>Сравниваем ответы</h2><p>Не закрывайте эту вкладку, пока идёт обработка.</p></div>
-        <ol class="stage-list">
-          <li data-stage="retrieval">Переписывается запрос и отбираются фрагменты</li>
-          <li data-stage="baseline_answer">Генерируется ответ с источниками и цитатами без фильтра</li>
-          <li data-stage="filtered_answer">Генерируется ответ с источниками и цитатами после фильтра</li>
-          <li data-stage="plain_answer">Генерируется ответ без RAG</li>
-          <li data-stage="summary">Генерируется саммари ответов</li>
-        </ol>
-      </div>
-      <article id="comparisonCard" hidden>
-        <div class="result-question-block">
-          <span class="result-label">Вопрос</span>
-          <h2 id="resultQuestion"></h2>
-        </div>
-        <div class="expected-block">
-          <span class="result-label">Ожидаемый результат</span>
-          <div id="resultExpected"></div>
-        </div>
-        <section id="retrievalMetrics" class="retrieval-metrics"></section>
-        <div class="answer-grid">
-          <section class="answer-card baseline-answer-card">
-            <h3>RAG без фильтра и rewriting</h3>
-            <div id="baselineAnswer" class="answer-content markdown-content"></div>
-          </section>
-          <section class="answer-card filtered-answer-card">
-            <h3>RAG с query rewrite, фильтром и цитатами</h3>
-            <div id="filteredAnswer" class="answer-content markdown-content"></div>
-          </section>
-          <section class="answer-card plain-answer-card">
-            <h3>Без RAG — контроль</h3>
-            <div id="plainAnswer" class="answer-content markdown-content"></div>
-          </section>
-        </div>
-        <details id="retrievedDetails" class="sources-details">
-          <summary>Показать кандидатов до фильтра и фрагменты после отбора</summary>
-          <div id="retrievedSources"></div>
-        </details>
-        <section class="summary-block">
-          <h3>Саммари ответов</h3>
-          <div id="answerSummary" class="markdown-content"></div>
-        </section>
-      </article>
-      <div id="benchmarkResult" class="benchmark-result" hidden></div>
-    </section>
   </div>
 </section>
 <style>
-  .compare-page { width: min(1180px, 100%); margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  .compare-page { width: min(900px, 100%); height: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
   .compare-header, .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
   .compare-header h1 { margin: 0 0 6px; font-size: 1.55rem; }
   .compare-header p, .panel-heading p { margin: 0; color: var(--text-dim); line-height: 1.5; }
   .panel-heading h2 { margin: 0 0 4px; font-size: 1.05rem; }
   .compare-panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .task-demo-panel { border-color: rgba(56,189,248,.38); display: flex; flex-direction: column; min-height: 70vh; }
+  .task-demo-note { margin-top: 12px; padding: 11px 13px; border-radius: 8px; background: rgba(56,189,248,.08); color: var(--text-dim); line-height: 1.5; font-size: .82rem; }
+  .task-demo-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .task-demo-controls button { margin: 0; }
+  .task-demo-controls .primary-btn:disabled, .task-demo-controls .benchmark-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .task-demo-progress { margin-top: 12px; padding: 11px; border-radius: 8px; background: rgba(255,255,255,.035); color: var(--text-dim); line-height: 1.5; font-size: .83rem; }
+  .task-demo-log { flex: 1; min-height: 240px; overflow-y: auto; padding: 24px 20px; display: flex; flex-direction: column; gap: 20px; }
+  .task-demo-log .msg-wrapper { max-width: 85%; }
+  .task-demo-log .task-demo-expected { align-self: center; max-width: 90%; color: var(--text-dim); font-size: .78rem; }
+  .task-demo-log .task-demo-expected summary { cursor: pointer; }
+  .task-demo-log .rag-evidence-card { align-self: flex-start; width: min(85%, 760px); }
+  .task-demo-next { position: sticky; bottom: 0; z-index: 2; display: flex; justify-content: flex-end; padding: 10px 0 0; background: linear-gradient(transparent, var(--bg-card) 30%); }
+  .task-demo-audit { margin-top: 14px; padding: 13px; border: 1px solid rgba(168,85,247,.45); border-radius: 9px; background: rgba(168,85,247,.08); }
+  .task-demo-audit h3, .task-demo-audit h4 { margin: 0 0 8px; }
+  .task-demo-audit pre { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-dim); font-size: .76rem; }
   .subtle-label, .result-label { color: var(--text-dim); font-size: .76rem; text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
-  .question-bank { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 14px; }
-  .question-option { display: block; width: 100%; text-align: left; padding: 12px; color: var(--text-main); background: rgba(15,23,42,.75); border: 1px solid var(--border); border-radius: 9px; cursor: pointer; }
-  .question-option:hover { border-color: var(--primary); background: rgba(99,102,241,.12); }
-  .question-option:disabled, .benchmark-btn:disabled, .primary-btn:disabled { opacity: .55; cursor: wait; }
-  .question-option strong { display: block; font-size: .9rem; line-height: 1.4; }
-  .question-option span { display: block; margin-top: 6px; color: var(--text-dim); font-size: .76rem; line-height: 1.45; }
-  .custom-question-panel summary, .sources-details summary { cursor: pointer; color: #c4b5fd; font-weight: 700; }
-  .custom-question-form { display: grid; gap: 8px; margin-top: 14px; }
-  .custom-question-form label { color: var(--text-dim); font-size: .82rem; font-weight: 700; }
-  .custom-question-form textarea { width: 100%; resize: vertical; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-dark); color: var(--text-main); padding: 10px; font: inherit; }
+  .primary-btn:disabled, .benchmark-btn:disabled { opacity: .55; cursor: wait; }
   .primary-btn, .benchmark-btn { border: 0; border-radius: 8px; color: white; padding: 10px 14px; font-weight: 700; cursor: pointer; background: linear-gradient(135deg, #7c3aed, #2563eb); }
   .benchmark-btn { flex-shrink: 0; background: linear-gradient(135deg, #e11d48, #f97316); }
   .empty-state { padding: 22px; color: var(--text-dim); text-align: center; border: 1px dashed var(--border); border-radius: 9px; }
@@ -713,7 +776,7 @@ COMPARISON_VIEW_HTML = """
   .source-chunk strong { display: block; color: #a7f3d0; margin-bottom: 5px; }
   .summary-block { margin-top: 14px; border-radius: 10px; border: 1px solid rgba(168,85,247,.45); background: rgba(168,85,247,.08); padding: 14px; }
   .benchmark-result { margin-top: 14px; white-space: pre-wrap; font-size: .84rem; line-height: 1.55; border-top: 1px solid var(--border); padding-top: 14px; }
-  @media (max-width: 1100px) { .question-bank, .answer-grid { grid-template-columns: 1fr; } .compare-header, .panel-heading { align-items: flex-start; flex-direction: column; } }
+  @media (max-width: 700px) { #comparisonView { padding: 12px; } .compare-header { align-items: flex-start; flex-direction: column; } .task-demo-log { padding: 16px 4px; } .task-demo-log .msg-wrapper, .task-demo-log .rag-evidence-card { max-width: 94%; width: 94%; } }
 </style>
 """
 
@@ -755,11 +818,8 @@ async function refreshUI() {
                 const cbRag = document.getElementById('rag_mode_enabled');
                 if (cbRag) cbRag.checked = state.config.rag_mode_enabled;
             }
-            const ragSettingsVisible = Boolean(state.config.rag_settings_visible);
-            const ragSettingsToggle = document.getElementById('rag_settings_visible');
-            if (ragSettingsToggle) ragSettingsToggle.checked = ragSettingsVisible;
             const ragSettingsControls = document.getElementById('ragSettingsControls');
-            if (ragSettingsControls) ragSettingsControls.style.display = ragSettingsVisible ? 'flex' : 'none';
+            if (ragSettingsControls) ragSettingsControls.style.display = state.config.rag_mode_enabled ? 'flex' : 'none';
             const rewrite = document.getElementById('ragRewriteEnabled');
             if (rewrite) rewrite.checked = state.config.rag_query_rewrite_enabled !== false;
             const before = document.getElementById('ragTopKBefore');
@@ -857,6 +917,7 @@ async function refreshUI() {
         };
         renderMap('ltmList', state.ltm, "Нет долговременных фактов");
         renderMap('wmList', state.wm, "Нет активных данных задачи");
+        renderTaskState(state.task_state || {});
 
         // Чат
         chatLog.innerHTML = '';
@@ -877,11 +938,14 @@ async function refreshUI() {
             const savedView = localStorage.getItem('day24-active-view');
             showAppView(savedView === 'comparison' ? 'comparison' : 'chat');
         }
-        await loadComparisonQuestions();
+        await loadTaskScenarios();
+        await loadFreeModels(state.config && state.config.model);
     } catch (e) { console.error(e); }
 }
 
 async function toggleRagMode(enabled) {
+    const controls = document.getElementById('ragSettingsControls');
+    if (controls) controls.style.display = enabled ? 'flex' : 'none';
     await fetch('/api/config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -889,14 +953,50 @@ async function toggleRagMode(enabled) {
     });
 }
 
-async function toggleRagSettings(visible) {
-    const controls = document.getElementById('ragSettingsControls');
-    controls.style.display = visible ? 'flex' : 'none';
-    await fetch('/api/config', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({rag_settings_visible: visible})
-    });
+function renderTaskState(task) {
+    document.getElementById('taskGoal').textContent = task.goal || 'Пока не зафиксирована';
+    const fillList = (id, values, formatter = value => value) => {
+        const list = document.getElementById(id);
+        list.replaceChildren();
+        (values || []).forEach(value => {
+            const li = document.createElement('li');
+            li.textContent = formatter(value);
+            list.appendChild(li);
+        });
+        if (!list.children.length) {
+            const li = document.createElement('li'); li.textContent = 'Пока нет'; list.appendChild(li);
+        }
+    };
+    fillList('taskClarifications', task.clarifications);
+    fillList('taskConstraints', task.constraints);
+    fillList('taskTerms', Object.entries(task.terms || {}), ([key, value]) => `${key}: ${value}`);
+}
+
+async function resetTaskState() {
+    await fetch('/api/task-state/reset', {method: 'POST'});
+    await refreshUI();
+}
+
+async function loadFreeModels(preferred) {
+    const select = document.getElementById('modelSelect');
+    try {
+        const response = await fetch('/api/models/free');
+        const data = await response.json();
+        if (!response.ok || !data.models?.length) return;
+        select.replaceChildren();
+        data.models.forEach(model => {
+            const option = document.createElement('option');
+            option.value = model.id;
+            option.textContent = model.id === 'openrouter/free' ? model.name : `${model.name} · ${model.id}`;
+            option.dataset.supportedParameters = JSON.stringify(model.supported_parameters || []);
+            option.disabled = model.chat_supported === false;
+            if (model.chat_supported === false) option.title = 'Требуется отдельный режим распознавания аудио; недоступен для текстового чата.';
+            select.appendChild(option);
+        });
+        const preferredModel = data.models.find(model => model.id === preferred && model.chat_supported !== false);
+        select.value = preferredModel ? preferred : 'openrouter/free';
+        select.dispatchEvent(new Event('change'));
+    } catch (error) { console.warn('Не удалось загрузить каталог бесплатных моделей OpenRouter', error); }
 }
 
 async function saveRetrievalSettings() {
@@ -1309,6 +1409,173 @@ addMessage = function(role, content, meta) {
     return res;
 };
 
+window.taskScenarios = [];
+window.activeTaskScenario = null;
+window.taskScenarioIndex = 0;
+window.taskScenarioChecks = [];
+window.taskScenarioStarted = false;
+window.taskScenarioBusy = false;
+
+async function loadTaskScenarios() {
+    if (window.taskScenariosLoaded) return;
+    try {
+        const response = await fetch('/api/rag/task-scenarios');
+        const data = await response.json();
+        window.taskScenarios = data.scenarios || [];
+        window.activeTaskScenario = window.taskScenarios.find(item => item.id === 'task-memory-t4-demo') || null;
+        if (!window.activeTaskScenario) throw new Error('Демо-сценарий не найден');
+        document.getElementById('scenarioStartBtn').addEventListener('click', startTaskScenario);
+        document.getElementById('scenarioStepBtn').addEventListener('click', sendTaskScenarioStep);
+        document.getElementById('scenarioResetBtn').addEventListener('click', resetTaskScenario);
+        window.taskScenariosLoaded = true;
+        updateTaskScenarioPanel();
+    } catch (error) {
+        const progress = document.getElementById('taskScenarioProgress');
+        if (progress) progress.textContent = `Сценарий недоступен: ${error.message}`;
+    }
+}
+
+function updateTaskScenarioPanel() {
+    const scenario = window.activeTaskScenario;
+    const progress = document.getElementById('taskScenarioProgress');
+    const start = document.getElementById('scenarioStartBtn');
+    const step = document.getElementById('scenarioStepBtn');
+    const reset = document.getElementById('scenarioResetBtn');
+    if (!scenario) { progress.textContent = 'Не удалось загрузить сценарий.'; return; }
+    start.disabled = window.taskScenarioBusy;
+    start.textContent = window.taskScenarioStarted ? 'Начать демо заново' : 'Начать демо с чистой историей';
+    step.disabled = !window.taskScenarioStarted || window.taskScenarioBusy || window.taskScenarioIndex >= scenario.turns.length;
+    step.textContent = window.taskScenarioIndex >= scenario.turns.length ? 'Диалог завершён' : 'Отправить следующий вопрос';
+    reset.disabled = !window.taskScenarioStarted || window.taskScenarioBusy;
+    if (!window.taskScenarioStarted) {
+        progress.innerHTML = `<b>Цель разговора:</b> ${scenario.goal}<br>В диалоге ${scenario.turns.length} шагов. Нажмите «Начать демо», затем отправляйте следующий ход кнопкой. После каждого ответа проверьте источники и панель памяти задачи в сайдбаре.`;
+        return;
+    }
+    if (window.taskScenarioIndex >= scenario.turns.length) {
+        const passed = window.taskScenarioChecks.filter(item => item.passed).length;
+        progress.innerHTML = `<b>Диалог завершён: ${scenario.turns.length}/${scenario.turns.length} ходов.</b><br>Ожидаемый источник найден в ${passed} из ${window.taskScenarioChecks.length} ответов. Ниже сравните ожидаемую память с тем, что агент сохранил.`;
+        return;
+    }
+    const turn = scenario.turns[window.taskScenarioIndex];
+    progress.innerHTML = `<b>Ход ${window.taskScenarioIndex + 1} из ${scenario.turns.length}</b><br>${turn.question}<br><span class="subtle-label">Ожидаемый источник: ${turn.expected_sources.join(', ') || 'нет'}</span>${window.taskScenarioBusy ? '<br><br>⏳ Генерируется ответ и сохраняется память задачи…' : ''}`;
+}
+
+async function startTaskScenario() {
+    if (!window.activeTaskScenario || window.taskScenarioBusy) return;
+    if (!document.getElementById('rag_mode_enabled').checked) {
+        alert('Для этого демо включите «Включать поиск по документам (RAG)» в сайдбаре, чтобы ответы сопровождались источниками.');
+        return;
+    }
+    if (!confirm('Начать демо с чистой историей диалога и памятью задачи? Настройки, инварианты и долговременная память сохранятся.')) return;
+    window.taskScenarioBusy = true;
+    updateTaskScenarioPanel();
+    try {
+        await fetch('/api/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({clear_all: false})});
+        await fetch('/api/task-state/reset', {method: 'POST'});
+        await fetch('/api/task-state/set', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({goal: window.activeTaskScenario.goal})});
+        document.getElementById('chat-log').innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">Привет! RAG отвечает по найденным документам и показывает источники с точными цитатами.</div></div>';
+        window.taskScenarioIndex = 0;
+        window.taskScenarioChecks = [];
+        window.taskScenarioStarted = true;
+        document.getElementById('taskScenarioLog').replaceChildren();
+        document.getElementById('taskScenarioAudit').hidden = true;
+        renderTaskState({goal: window.activeTaskScenario.goal});
+    } catch (error) {
+        alert(`Не удалось начать демо: ${error.message}`);
+    } finally {
+        window.taskScenarioBusy = false;
+        updateTaskScenarioPanel();
+    }
+}
+
+async function resetTaskScenario() {
+    if (!confirm('Сбросить ход демо, историю диалога и память задачи?')) return;
+    if (window.taskScenarioBusy) return;
+    window.taskScenarioBusy = true;
+    try {
+        await fetch('/api/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({clear_all: false})});
+        await fetch('/api/task-state/reset', {method: 'POST'});
+        document.getElementById('chat-log').innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">История демо очищена.</div></div>';
+        window.taskScenarioStarted = false;
+        window.taskScenarioIndex = 0;
+        window.taskScenarioChecks = [];
+        document.getElementById('taskScenarioLog').replaceChildren();
+        document.getElementById('taskScenarioAudit').hidden = true;
+        renderTaskState({});
+    } finally {
+        window.taskScenarioBusy = false;
+        updateTaskScenarioPanel();
+    }
+}
+
+function addTaskScenarioTurn(turn, data, stepNumber) {
+    const evidence = String(data.rag_evidence || '');
+    const expectedSources = turn.expected_sources || [];
+    const passed = expectedSources.length === 0 || expectedSources.every(source => evidence.includes(source));
+    window.taskScenarioChecks.push({passed, expected: expectedSources});
+    const log = document.getElementById('taskScenarioLog');
+    const question = originalAddMessage('user', turn.question);
+    log.appendChild(question.cloneNode(true));
+    const answer = originalAddMessage('bot', data.content || 'Модель не вернула текстовый ответ.', {
+        model: data.model || 'Модель', time: data.time || 0, usage: data.usage || null, rag_evidence: evidence
+    });
+    log.appendChild(answer.cloneNode(true));
+    const expected = document.createElement('details');
+    expected.className = 'task-demo-expected';
+    const expectedSummary = document.createElement('summary');
+    expectedSummary.textContent = `Проверка шага ${stepNumber}: ${passed ? '✅ ожидаемый источник найден' : '⚠️ ожидаемый источник не найден'} · показать ожидание`;
+    const expectedText = document.createElement('p');
+    expectedText.textContent = turn.expected || 'Сверьте ответ с целью и уточнениями диалога.';
+    expected.append(expectedSummary, expectedText);
+    log.appendChild(expected);
+    expected.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
+async function sendTaskScenarioStep() {
+    const scenario = window.activeTaskScenario;
+    if (!window.taskScenarioStarted || !scenario || window.taskScenarioBusy) return;
+    const turn = scenario.turns[window.taskScenarioIndex];
+    if (!turn) return;
+    window.taskScenarioBusy = true;
+    const originalPendingBubble = originalAddMessage('bot', null);
+    window.taskScenarioPendingBubble = originalPendingBubble.cloneNode(true);
+    originalPendingBubble.remove();
+    document.getElementById('taskScenarioLog').appendChild(window.taskScenarioPendingBubble);
+    updateTaskScenarioPanel();
+    try {
+        const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({message: turn.question, config: comparisonConfig(), tools_enabled: false})
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || 'Не удалось получить ответ');
+        window.taskScenarioPendingBubble?.remove();
+        window.taskScenarioPendingBubble = null;
+        addTaskScenarioTurn(turn, data, window.taskScenarioIndex + 1);
+        window.taskScenarioIndex += 1;
+        const stateResponse = await fetch('/api/state');
+        const state = await stateResponse.json();
+        renderTaskState(state.task_state || {});
+        if (window.taskScenarioIndex >= scenario.turns.length) {
+            const audit = document.getElementById('taskScenarioAudit');
+            document.getElementById('taskScenarioExpectedMemory').replaceChildren(...scenario.memory_expectations.map(item => {
+                const li = document.createElement('li'); li.textContent = item; return li;
+            }));
+            document.getElementById('taskScenarioActualMemory').textContent = JSON.stringify(state.task_state || {}, null, 2);
+            audit.hidden = false;
+        }
+    } catch (error) {
+        window.taskScenarioPendingBubble?.remove();
+        window.taskScenarioPendingBubble = null;
+        const errorBubble = originalAddMessage('bot', `Ошибка: ${error.message}. Повторите этот шаг.`);
+        document.getElementById('taskScenarioLog').appendChild(errorBubble.cloneNode(true));
+    } finally {
+        window.taskScenarioBusy = false;
+        updateTaskScenarioPanel();
+    }
+}
+
 initApp = refreshUI;
 """
 
@@ -1316,6 +1583,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed_url = urlparse(self.path)
         path = parsed_url.path.rstrip('/')
+        if path == "/api/models/free":
+            self._send_json({"models": _get_free_openrouter_models()})
+            return
+
+        if path == "/api/rag/task-scenarios":
+            scenario_file = ROOT / "rag_task_scenarios.json"
+            try:
+                self._send_json(json.loads(scenario_file.read_text(encoding="utf-8")))
+            except Exception as exc:
+                self._send_json({"error": f"Не удалось загрузить сценарии: {exc}"})
+            return
+
         if path == "/api/rag/questions":
             eval_file = ROOT / "rag_evaluation_questions.json"
             try:
@@ -1369,7 +1648,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         page_html = get_chat_page(
-            title="RAG — Цитаты и анти-галлюцинации — День 24",
+            title="Мини-чат с RAG и памятью задачи — День 25",
             extra_sidebar_html=SIDEBAR_STATS_HTML,
             extra_scripts=EXTRA_SCRIPTS,
             extra_main_html=COMPARISON_VIEW_HTML,
@@ -1389,9 +1668,11 @@ class Handler(BaseHTTPRequestHandler):
                 user_msg = data.get("message", "")
                 with _LOCK:
                     agent.set_config(data.get("config", {}))
-                    available_clients = [pipeline_client, scheduler_client, git_client]
-                    if agent.rag_mode_enabled:
-                        available_clients.insert(0, indexer_client)
+                    available_clients = []
+                    if data.get("tools_enabled", True):
+                        available_clients = [pipeline_client, scheduler_client, git_client]
+                        if agent.rag_mode_enabled:
+                            available_clients.insert(0, indexer_client)
                     result = agent.chat(
                         user_msg,
                         mcp_clients=available_clients,
@@ -1533,6 +1814,18 @@ class Handler(BaseHTTPRequestHandler):
                     agent.pin_to_ltm(data.get("key", ""), data.get("value", ""))
                 self._send_json({"status": "pinned"})
 
+            elif path == "/api/task-state/reset":
+                with _LOCK:
+                    agent.reset_task_state()
+                self._send_json({"status": "reset"})
+
+            elif path == "/api/task-state/set":
+                data = json.loads(raw_body)
+                with _LOCK:
+                    agent.task_state["goal"] = str(data.get("goal", "")).strip()[:500]
+                    agent._save_state()
+                self._send_json({"status": "updated"})
+
             elif path == "/api/tsm/update":
                 data = json.loads(raw_body)
                 with _LOCK:
@@ -1565,7 +1858,7 @@ def load_env() -> None:
 
 if __name__ == "__main__":
     load_env()
-    print(f"🚀 День 24 RAG Citations & Anti-Hallucination: http://127.0.0.1:{PORT}")
+    print(f"🚀 День 25 Мини-чат с RAG и памятью задачи: http://127.0.0.1:{PORT}")
     class ReusableThreadingHTTPServer(ThreadingHTTPServer):
         allow_reuse_address = True
     try:
