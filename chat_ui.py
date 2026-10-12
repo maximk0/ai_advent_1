@@ -13,14 +13,14 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <style>
     :root {
-      --bg-dark: #0f172a;
-      --bg-card: #1e293b;
-      --border: #334155;
-      --text-main: #f1f5f9;
-      --text-dim: #94a3b8;
-      --primary: #6366f1;
-      --primary-hover: #4f46e5;
-      --accent: #a855f7;
+      --bg-dark: #0d1117;
+      --bg-card: #151c26;
+      --border: #2b3747;
+      --text-main: #edf2f8;
+      --text-dim: #a9b6c8;
+      --primary: #3d82d8;
+      --primary-hover: #6a9ff3;
+      --accent: #85b8ff;
     }
 
     * { box-sizing: border-box; }
@@ -28,7 +28,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
       margin: 0; padding: 0;
-      background: var(--bg-dark);
+      background: radial-gradient(ellipse at top, #1a2a3c 0, #0d1117 55%);
       color: var(--text-main);
       display: flex;
       height: 100vh;
@@ -39,7 +39,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
     .sidebar {
       width: 320px;
       flex-shrink: 0;
-      background: var(--bg-card);
+      background: linear-gradient(160deg, rgba(24,32,44,.98), rgba(17,23,32,.98));
       border-right: 1px solid var(--border);
       display: flex;
       flex-direction: column;
@@ -348,9 +348,10 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
     </div>
 
     <div class="config-group">
-      <label>Модель (OpenRouter)</label>
+      <label>Модель</label>
       <select id="modelSelect">
         <option value="openrouter/free" selected data-supported-parameters='["temperature","top_p","top_k"]'>OpenRouter Free (автовыбор доступной модели)</option>
+        <option value="local/qwen3-4b" data-supported-parameters='["temperature","top_p","top_k"]'>Qwen3 4B Q4_K_M · локально (llama.cpp)</option>
         <option value="z-ai/glm-4.5" data-supported-parameters='["temperature","top_p","top_k"]'>Z.ai GLM 4.5 · $0.60/M вход · $2.20/M выход</option>
         <option value="openai/gpt-4o-mini" data-supported-parameters='["temperature","top_p","top_k"]'>OpenAI GPT-4o mini · $0.15/M вход · $0.60/M выход</option>
         <option value="meta-llama/llama-3.2-3b-instruct:free" data-supported-parameters='["temperature","top_p","top_k"]'>Meta Llama 3.2 3B Instruct (free)</option>
@@ -360,7 +361,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
         <option value="poolside/laguna-s-2.1:free" data-supported-parameters='[]'>Poolside Laguna S 2.1 (free) · poolside/laguna-s-2.1:free</option>
         <option value="nvidia/nemotron-3.5-lightning:free" data-supported-parameters='[]'>NVIDIA Nemotron 3.5 Lightning (free) · nvidia/nemotron-3.5-lightning:free</option>
       </select>
-      <div class="control-help">Бесплатные модели загружаются из каталога OpenRouter; избранные модели показаны отдельно с ценой. Grok STT распознаёт аудио и не работает как текстовый чат.</div>
+      <div class="control-help">В списке есть облачные модели OpenRouter и локальная Qwen3 4B. Для локальной модели запустите llama.cpp сервер на порту 8080. Бесплатные модели загружаются из каталога OpenRouter; Grok STT предназначен для распознавания аудио.</div>
     </div>
 
     <details class="sidebar-disclosure">

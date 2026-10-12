@@ -361,7 +361,8 @@ class SimpleAgent:
 
     def _route_memory(self, user_msg: str, assistant_msg: str):
         api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not api_key: return
+        is_local_model = str(self.model).startswith("local/")
+        if not api_key and not is_local_model: return
 
         prompt = (
             "Ты — менеджер многоуровневой памяти и контроллер конечного автомата задач (TSM) ИИ-агента.\n"
@@ -401,24 +402,24 @@ class SimpleAgent:
             "}\n"
         )
 
-        url = "https://openrouter.ai/api/v1/chat/completions"
+        url = "http://127.0.0.1:8080/v1/chat/completions" if is_local_model else "https://openrouter.ai/api/v1/chat/completions"
         body = {
-            "model": self.FAST_MODEL,
+            "model": "Qwen3-4B-Q4_K_M" if is_local_model else self.FAST_MODEL,
             "messages": [
                 {"role": "system", "content": "Ты — эксперт по структурированию памяти и состояний. Отвечаешь строго валидным JSON без markdown."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.1
         }
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "X-Title": "Controlled TSM Router"
-        }
+        if is_local_model:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+        headers = {"Content-Type": "application/json"}
+        if not is_local_model:
+            headers.update({"Authorization": f"Bearer {api_key}", "X-Title": "Controlled TSM Router"})
 
         try:
             req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=30) as res:
+            with urllib.request.urlopen(req, timeout=120 if is_local_model else 30) as res:
                 raw_res = res.read().decode("utf-8")
                 resp_data = json.loads(raw_res)
 
@@ -482,8 +483,9 @@ class SimpleAgent:
         rag_source_prefix: str | None = None,
         rag_chunks: list | None = None,
     ) -> dict:
+        is_local_model = str(self.model).startswith("local/")
         api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
+        if not is_local_model and not api_key:
             return {"error": "Нет OPENROUTER_API_KEY в .env"}
 
         # Evaluation runs can supply a fresh, in-memory history and avoid
@@ -692,13 +694,17 @@ class SimpleAgent:
                     except Exception as e:
                         print(f"[Native MCP] Error loading tools from client: {e}")
 
-        url = "https://openrouter.ai/api/v1/chat/completions"
+        url = "http://127.0.0.1:8080/v1/chat/completions" if is_local_model else "https://openrouter.ai/api/v1/chat/completions"
+        model_name = "Qwen3-4B-Q4_K_M" if is_local_model else self.model
         body = {
-            "model": self.model,
+            "model": model_name,
             "messages": messages,
             "max_tokens": 2000,
-            "plugins": [{"id": "context-compression", "enabled": self.context_compression}]
         }
+        if not is_local_model:
+            body["plugins"] = [{"id": "context-compression", "enabled": self.context_compression}]
+        else:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
         supported = self.model_supported_parameters
         if not supported or "temperature" in supported:
             body["temperature"] = self.temperature
@@ -707,21 +713,19 @@ class SimpleAgent:
         if self.top_k > 0 and (not supported or "top_k" in supported):
             body["top_k"] = self.top_k
 
-        if openai_tools:
+        if openai_tools and not is_local_model:
             body["tools"] = openai_tools
             body["tool_choice"] = "auto"
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "HTTP-Referer": "http://localhost",
-            "X-Title": "Native MCP Agent"
+            **({} if is_local_model else {"Authorization": f"Bearer {api_key}", "HTTP-Referer": "http://localhost", "X-Title": "Native MCP Agent"})
         }
 
         start_time = time.time()
         try:
             req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-            with _openrouter_request_with_retry(req, timeout=120) as res:
+            with (urllib.request.urlopen(req, timeout=300) if is_local_model else _openrouter_request_with_retry(req, timeout=120)) as res:
                 raw_response = res.read().decode("utf-8")
                 elapsed = time.time() - start_time
                 resp_data = json.loads(raw_response)
