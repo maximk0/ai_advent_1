@@ -17,7 +17,7 @@
 <body>
 <main>
   <header class="top">
-    <div><div class="eyebrow">Практика · День 28</div><h1>Локальная LLM + RAG</h1><p>Один и тот же найденный контекст — двум моделям. Сравните ответы, время и стабильность.</p></div>
+    <div><div class="eyebrow">Практика · День 29</div><h1>Оптимизация локальной LLM</h1><p>Один вопрос и одинаковый контекст до и после: сравните точность, скорость и потребление памяти.</p></div>
     <div class="status"><span id="localStatus" class="pill">Проверяю локальную модель…</span><span id="indexStatus" class="pill">Проверяю индекс…</span><span id="cloudStatus" class="pill">Облако…</span></div>
   </header>
   <div class="layout">
@@ -27,17 +27,20 @@
       <div class="field"><label for="question">Ваш вопрос</label><textarea id="question" placeholder="Например: сколько воды получает грядка за один цикл полива?"></textarea></div>
       <div class="field"><label for="expected">Ожидаемый результат — для оценки качества</label><textarea id="expected" placeholder="Можно оставить пустым для своего вопроса."></textarea></div>
       <div class="field"><label for="sources">Ожидаемые источники — через запятую</label><input id="sources" placeholder="Например: docs/irrigation_and_climate.md"></div>
-      <label class="check"><input id="cloudEnabled" type="checkbox"><span><b>Сравнить с облачной моделью</b><br>Обе модели получат одинаковые найденные фрагменты. Облако необязательно.</span></label>
-      <div class="field" id="cloudModelField" hidden><label for="cloudModel">Модель OpenRouter</label><input id="cloudModel" value="openrouter/free" list="cloudChoices"><datalist id="cloudChoices"><option value="openrouter/free"><option value="openai/gpt-4o-mini"><option value="z-ai/glm-4.5"><option value="qwen/qwen3.6-flash"></datalist></div>
+      <details class="explain"><summary>Дополнительно: сравнить с облачной моделью (День 28)</summary>
+        <label class="check"><input id="cloudEnabled" type="checkbox"><span><b>Добавить облачный ответ</b><br>Он получит тот же найденный контекст.</span></label>
+        <div class="field" id="cloudModelField" hidden><label for="cloudModel">Модель OpenRouter</label><input id="cloudModel" value="openrouter/free" list="cloudChoices"><datalist id="cloudChoices"><option value="openrouter/free"><option value="openai/gpt-4o-mini"><option value="z-ai/glm-4.5"><option value="qwen/qwen3.6-flash"></datalist></div>
+        <div class="field"><label for="repeats">Повторы для оценки стабильности</label><select id="repeats"><option value="1">1 ответ</option><option value="2">2 одинаковых запроса</option><option value="3">3 одинаковых запроса</option></select></div>
+        <button class="quiet" id="runButton" type="button">Сравнить локальную и облачную модели</button>
+      </details>
       <details class="explain"><summary>Настройки локального поиска</summary>
         <div class="row" style="margin-top:12px"><div class="field"><label for="topKBefore">Кандидатов до фильтра</label><input id="topKBefore" type="number" min="1" max="50" value="10"></div><div class="field"><label for="topKAfter">Фрагментов модели</label><input id="topKAfter" type="number" min="1" max="10" value="3"></div></div>
         <div class="field"><label for="threshold">Порог релевантности (0–1)</label><input id="threshold" type="number" min="0" max="1" step="0.05" value="0.25"></div>
         <label class="check"><input id="rewrite" type="checkbox" checked><span>Переписывать запрос перед поиском</span></label>
         <p class="hint">Поиск проходит локально по существующему document_index.json: совпадение слов, синонимы, фильтр и Top‑K. Индекс не перестраивается.</p>
       </details>
-      <div class="field" style="margin-top:12px"><label for="repeats">Повторы для оценки стабильности</label><select id="repeats"><option value="1">1 ответ</option><option value="2">2 одинаковых запроса</option><option value="3">3 одинаковых запроса</option></select></div>
-      <button class="btn" id="runButton">Найти контекст и сравнить ответы</button>
-      <p class="foot">Сначала локально ищутся фрагменты. Затем локальная Qwen формирует ответ. Облачный запрос отправляется только при включении этой опции.</p>
+      <button class="btn" id="day29RunButton" type="button">Запустить демо: до и после оптимизации</button>
+      <p class="foot">Поиск выполняется один раз. Локальная Qwen получает одинаковые фрагменты в двух последовательных запусках с разными профилями.</p>
     </aside>
     <section>
       <div id="loader" class="loader"><span class="spinner"></span><span id="loaderText">Ищу фрагменты в локальном индексе…</span></div>
@@ -46,6 +49,14 @@
         <article class="card"><h2>Вопрос и ожидание</h2><p id="resultQuestion" style="color:var(--text)"></p><p id="resultExpected"></p><p class="metadata" id="resultExpectedSources"></p></article>
         <article class="card"><h2>Что нашлось в индексе</h2><div class="metric-grid" id="retrievalMetrics"></div><details id="sourcesDetails"><summary>Показать использованные фрагменты, источники и цитаты</summary><div id="sourceChunks"></div></details></article>
         <article class="card"><h2>Ответы моделей</h2><div class="columns" id="answerColumns"></div></article>
+      </div>
+      <div id="day29Results" hidden>
+        <article class="card"><h2>День 29 · один запрос до и после оптимизации</h2><p id="day29Question"></p><p id="day29Expected"></p><div class="metric-grid" id="day29RuntimeMetrics"></div><p class="hint" id="day29ComparisonNote"></p></article>
+        <article class="card"><h2>Сравнение ответов локальной модели</h2><div class="columns">
+          <div class="answer-card"><h3>До оптимизации</h3><p class="metadata" id="day29BaselineConfig"></p><div class="answer" id="day29BaselineAnswer"></div><div id="day29BaselineFacts"></div></div>
+          <div class="answer-card"><h3>После оптимизации</h3><p class="metadata" id="day29OptimizedConfig"></p><div class="answer" id="day29OptimizedAnswer"></div><div id="day29OptimizedFacts"></div></div>
+        </div></article>
+        <article class="card"><h2>Найденные источники для обоих запусков</h2><div class="metric-grid" id="day29RetrievalMetrics"></div><details><summary>Показать одинаковые фрагменты и цитаты</summary><div id="day29Sources"></div></details></article>
       </div>
     </section>
   </div>
@@ -105,16 +116,48 @@
     const heading=`<h3>${escapeHtml(label)}<span class="badge">${escapeHtml(result.model||'')}</span></h3><p class="metadata">${stableText}${stable.elapsed_total?` · суммарно ${stable.elapsed_total} с`:''}</p>`;
     return `<div>${heading}<div class="columns">${attempts.map(renderAttempt).join('')}</div></div>`;
   }
+  function renderDay29Profile(profile, answerId, factsId){
+    $(answerId).textContent=profile?.answer||'Ответ не получен.';
+    if(!profile?.ok){$(factsId).innerHTML=`<p class="unsupported">${escapeHtml(profile?.error||'Ошибка локальной модели')}</p>`;return;}
+    const ev=profile.evaluation||{};
+    const facts=[...(ev.matched||[]).map(x=>`<li class="good">В ответе есть: ${escapeHtml(x)}</li>`),...(ev.missing||[]).map(x=>`<li class="miss">Не хватает: ${escapeHtml(x)}</li>`),...(ev.unsupported||[]).map(x=>`<li class="unsupported">Не подтверждено цитатами: ${escapeHtml(x)}</li>`),...(ev.expected_sources_missing||[]).map(x=>`<li class="miss">Не найден ожидаемый источник: ${escapeHtml(x)}</li>`)];
+    $(factsId).innerHTML=`<p class="metadata">Контрольные факты: ${escapeHtml(ev.score||'не заданы')}</p>${facts.length?`<ul class="facts">${facts.join('')}</ul>`:''}`;
+  }
+  function renderDay29(data){
+    $('day29Question').textContent=`Вопрос: ${data.question}`;
+    $('day29Expected').textContent=data.expected?`Ожидаемый результат: ${data.expected}`:'Ожидание не задано; ответы можно сравнить вручную.';
+    const status=data.model_status||{};const b=data.baseline||{};const o=data.optimized||{};
+    const mb=x=>x==null?'нет данных':`${x} МБ`;
+    $('day29RuntimeMetrics').innerHTML=[metric('Модель',status.model||'не определена'),metric('Квантование',status.quantization||'не определено'),metric('Контекст сервера',status.context_window?`${status.context_window} токенов`:'не удалось прочитать'),metric('Время до / после',`${b.elapsed??'—'} / ${o.elapsed??'—'} с`),metric('Пиковый RSS до / после',`${mb(b.llama_server_rss_peak_sampled_mb)} / ${mb(o.llama_server_rss_peak_sampled_mb)}`),metric('RSS до ответа',`${mb(b.llama_server_rss_before_mb)} / ${mb(o.llama_server_rss_before_mb)}`),metric('RSS после ответа',`${mb(b.llama_server_rss_after_mb)} / ${mb(o.llama_server_rss_after_mb)}`)].join('');
+    $('day29ComparisonNote').textContent=data.comparison_note||data.resource_note||'';
+    $('day29BaselineConfig').textContent=`temperature ${b.temperature}; max_tokens ${b.max_tokens}; базовый промпт`;
+    $('day29OptimizedConfig').textContent=`temperature ${o.temperature}; max_tokens ${o.max_tokens}; промпт для правил «Сова-17»`;
+    renderDay29Profile(b,'day29BaselineAnswer','day29BaselineFacts');renderDay29Profile(o,'day29OptimizedAnswer','day29OptimizedFacts');
+    const r=data.retrieval||{};
+    $('day29RetrievalMetrics').innerHTML=[metric('Поиск',`${r.elapsed??'—'} с`),metric('Кандидаты',r.candidate_count??0),metric('Прошли порог',r.passed_threshold_count??0),metric('Передано в оба запроса',r.chunks?.length??0)].join('');
+    $('day29Sources').replaceChildren();
+    for(const chunk of r.chunks||[]){const div=document.createElement('div');div.className='chunk';const title=document.createElement('strong');title.textContent=`${chunk.source} · ${chunk.section||'раздел не указан'} · ${chunk.chunk_id} · similarity ${Number(chunk.similarity||0).toFixed(2)}`;const p=document.createElement('p');p.textContent=chunk.text||'';div.append(title,p);$('day29Sources').append(div);}
+    if(!r.chunks?.length)$('day29Sources').textContent=r.evidence||'Фрагментов нет.';
+    $('results').hidden=true;$('day29Results').hidden=false;
+  }
+  $('day29RunButton').addEventListener('click',async()=>{
+    const question=$('question').value.trim();if(!question){alert('Выберите контрольный вопрос или введите свой.');return;}
+    const payload={question,expected:$('expected').value.trim(),expected_sources:$('sources').value.split(',').map(s=>s.trim()).filter(Boolean),criteria:activeCriteria,top_k_before:Number($('topKBefore').value),top_k_after:Number($('topKAfter').value),similarity_threshold:Number($('threshold').value),query_rewrite_enabled:$('rewrite').checked};
+    $('runButton').disabled=true;$('day29RunButton').disabled=true;$('loader').classList.add('show');$('loaderText').textContent='Выполняю один поиск, затем сравню два ответа Qwen…';$('empty').hidden=true;$('results').hidden=true;$('day29Results').hidden=true;
+    try{const r=await fetch('/api/day29/optimize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Не удалось выполнить сравнение');renderDay29(d);}
+    catch(e){$('empty').hidden=false;$('empty').innerHTML=`<b>Не получилось сравнить ответы</b>${escapeHtml(e.message)}`;}
+    finally{$('loader').classList.remove('show');$('runButton').disabled=false;$('day29RunButton').disabled=false;}
+  });
   $('runButton').addEventListener('click',async()=>{
     const question=$('question').value.trim();if(!question){alert('Выберите контрольный вопрос или введите свой.');return;}
     const expectedSources=$('sources').value.split(',').map(s=>s.trim()).filter(Boolean);
     const payload={question,expected:$('expected').value.trim(),expected_sources:expectedSources,criteria:activeCriteria,cloud_enabled:$('cloudEnabled').checked,cloud_model:$('cloudModel').value.trim(),repeats:Number($('repeats').value),top_k_before:Number($('topKBefore').value),top_k_after:Number($('topKAfter').value),similarity_threshold:Number($('threshold').value),query_rewrite_enabled:$('rewrite').checked};
-    $('runButton').disabled=true;$('loader').classList.add('show');$('loaderText').textContent=payload.cloud_enabled?'Ищу фрагменты локально, затем последовательно запрашиваю обе модели…':'Ищу фрагменты и запрашиваю локальную модель…';$('empty').hidden=true;$('results').hidden=true;
+    $('runButton').disabled=true;$('day29RunButton').disabled=true;$('loader').classList.add('show');$('loaderText').textContent=payload.cloud_enabled?'Ищу фрагменты локально, затем последовательно запрашиваю обе модели…':'Ищу фрагменты и запрашиваю локальную модель…';$('empty').hidden=true;$('results').hidden=true;$('day29Results').hidden=true;
     try{const r=await fetch('/api/day28/compare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||'Не удалось сравнить ответы');
       $('resultQuestion').textContent=d.question;$('resultExpected').textContent=d.expected?`Ожидаемый результат: ${d.expected}`:'Ожидаемый результат для этого вопроса не задан.';$('resultExpectedSources').textContent=d.expected_sources?.length?`Ожидаемые источники: ${d.expected_sources.join('; ')}`:'';
       renderRetrieval(d.retrieval);const col=[renderModel('Локальная модель · RAG ON',d.local)];if(d.cloud)col.push(renderModel('Облачная модель · RAG ON',d.cloud));$('answerColumns').innerHTML=col.join('');$('results').hidden=false;
     }catch(e){$('empty').hidden=false;$('empty').innerHTML=`<b>Не получилось выполнить запрос</b>${escapeHtml(e.message)}`;}
-    finally{$('loader').classList.remove('show');$('runButton').disabled=false;}
+    finally{$('loader').classList.remove('show');$('runButton').disabled=false;$('day29RunButton').disabled=false;}
   });
   loadStatus();loadQuestions();setInterval(loadStatus,10000);
 </script>

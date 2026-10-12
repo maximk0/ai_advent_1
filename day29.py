@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -27,6 +29,13 @@ PROMPT_TEMPLATE = (
     "Используй только факты из предоставленных фрагментов, не додумывай. Если фрагменты не дают ответа, "
     "скажи: «Не знаю по найденным документам» и попроси уточнить вопрос. "
     "Для ключевых утверждений указывай chunk_id в квадратных скобках. Дай завершённый ответ сразу."
+)
+OPTIMIZED_PROMPT_TEMPLATE = (
+    "Ты — помощник дежурного учебной оранжереи «Сова-17». Отвечай кратко и сразу по существу. "
+    "Используй только факты из переданных фрагментов: не добавляй общие советы, не придумывай правила и не объявляй о будущем поиске. "
+    "Для каждого действия сохраняй точный порядок, сроки, пороги температуры, места и названия журналов. "
+    "Указывай chunk_id рядом с подтверждёнными фактами. Если фрагменты не отвечают на вопрос, скажи: "
+    "«Не знаю по найденным документам» и попроси уточнить вопрос."
 )
 
 
@@ -68,7 +77,22 @@ def _local_status() -> dict:
         models = _http_json(f"{LOCAL_BASE_URL}/v1/models", timeout=5).get("data", [])
         if not models:
             return {"connected": False, "error": "llama.cpp доступен, но модель не найдена."}
-        return {"connected": True, "model": models[0].get("id", DEFAULT_LOCAL_MODEL)}
+        model_id = models[0].get("id", DEFAULT_LOCAL_MODEL)
+        context_window = None
+        try:
+            slots = _http_json(f"{LOCAL_BASE_URL}/slots", timeout=3)
+            if isinstance(slots, list):
+                values = [int(slot.get("n_ctx")) for slot in slots if isinstance(slot, dict) and slot.get("n_ctx")]
+                context_window = min(values) if values else None
+        except Exception:
+            pass
+        quantization_match = re.search(r"Q[2-8]_[K0-9]+(?:_[A-Z0-9]+)?", str(model_id), re.IGNORECASE)
+        return {
+            "connected": True,
+            "model": model_id,
+            "context_window": context_window,
+            "quantization": quantization_match.group(0).upper() if quantization_match else "не определено по ID модели",
+        }
     except Exception as exc:
         return {"connected": False, "error": f"Не удалось подключиться к llama.cpp на {LOCAL_BASE_URL}: {exc}"}
 
@@ -83,18 +107,25 @@ def _index_info() -> dict:
     }
 
 
-def _local_answer(question: str, context: str) -> dict:
+def _local_answer(
+    question: str,
+    context: str,
+    *,
+    system_prompt: str = PROMPT_TEMPLATE,
+    temperature: float = 0.2,
+    max_tokens: int = 1000,
+) -> dict:
     status = _local_status()
     if not status.get("connected"):
         raise RuntimeError(status.get("error", "Локальная модель недоступна."))
     payload = {
         "model": status["model"],
         "messages": [
-            {"role": "system", "content": PROMPT_TEMPLATE + "\n\nФРАГМЕНТЫ БАЗЫ:\n" + context},
+            {"role": "system", "content": system_prompt + "\n\nФРАГМЕНТЫ БАЗЫ:\n" + context},
             {"role": "user", "content": question},
         ],
-        "temperature": 0.2,
-        "max_tokens": 1000,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
         "stream": False,
         "chat_template_kwargs": {"enable_thinking": False},
     }
@@ -313,6 +344,168 @@ def run_comparison(data: dict) -> dict:
     return response
 
 
+def _llama_server_rss_mb() -> float | None:
+    """Return RSS for the running llama-server process, if ps can identify it."""
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "rss=,command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        values = []
+        for line in result.stdout.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2 and "llama-server" in parts[1] and not parts[1].lstrip().startswith("ps "):
+                try:
+                    values.append(int(parts[0]))
+                except ValueError:
+                    continue
+        return round(sum(values) / 1024, 1) if values else None
+    except Exception:
+        return None
+
+
+def _measured_local_answer(question: str, context: str, profile: dict, chunks: list[dict], criteria: list[dict], expected_sources: list[str]) -> dict:
+    stop_sampling = threading.Event()
+    samples = []
+
+    def sample_memory() -> None:
+        while not stop_sampling.is_set():
+            rss = _llama_server_rss_mb()
+            if rss is not None:
+                samples.append(rss)
+            stop_sampling.wait(0.4)
+
+    before = _llama_server_rss_mb()
+    sampler = threading.Thread(target=sample_memory, daemon=True)
+    sampler.start()
+    try:
+        result = _local_answer(
+            question,
+            context,
+            system_prompt=profile["prompt"],
+            temperature=profile["temperature"],
+            max_tokens=profile["max_tokens"],
+        )
+    except Exception as exc:
+        result = {"ok": False, "answer": "", "error": str(exc), "elapsed": None, "usage": {}}
+    finally:
+        stop_sampling.set()
+        sampler.join(timeout=2)
+    after = _llama_server_rss_mb()
+    if before is not None:
+        samples.append(before)
+    if after is not None:
+        samples.append(after)
+    answer = result.get("answer", "")
+    return {
+        **result,
+        "profile": profile["label"],
+        "temperature": profile["temperature"],
+        "max_tokens": profile["max_tokens"],
+        "evaluation": _evaluate(answer, chunks, criteria, expected_sources) if result.get("ok") else None,
+        "llama_server_rss_before_mb": before,
+        "llama_server_rss_after_mb": after,
+        "llama_server_rss_peak_sampled_mb": max(samples) if samples else None,
+    }
+
+
+def run_day29_optimization_demo(data: dict) -> dict:
+    """Compare the current local RAG profile with a task-tuned profile."""
+    question = str(data.get("question", "")).strip()
+    if not question:
+        raise ValueError("Выберите контрольный вопрос или введите свой.")
+    if len(question) > MAX_QUESTION:
+        raise ValueError(f"Сократите вопрос до {MAX_QUESTION} символов.")
+    top_k_before = max(1, min(int(data.get("top_k_before", 10)), 50))
+    top_k_after = max(1, min(int(data.get("top_k_after", 3)), top_k_before))
+    threshold = max(0.0, min(float(data.get("similarity_threshold", 0.25)), 1.0))
+    rewrite = bool(data.get("query_rewrite_enabled", True))
+    criteria = data.get("criteria", []) if isinstance(data.get("criteria", []), list) else []
+    expected_sources = data.get("expected_sources", []) if isinstance(data.get("expected_sources", []), list) else []
+
+    retrieval_started = time.monotonic()
+    retrieval = DocumentIndexer().compare_retrieval(
+        question,
+        source_prefix="docs/",
+        top_k_before=top_k_before,
+        top_k_after=top_k_after,
+        similarity_threshold=threshold,
+        query_rewrite_enabled=rewrite,
+    )
+    retrieval_elapsed = round(time.monotonic() - retrieval_started, 4)
+    chunks = retrieval["filtered_results"]
+    context = "\n\n".join(
+        f"Источник: {chunk.get('source')}\nРаздел: {chunk.get('section')}\n"
+        f"chunk_id: {chunk.get('chunk_id')}\nФрагмент:\n{chunk.get('text', '')}"
+        for chunk in chunks
+    )
+    retrieval_info = {
+        "elapsed": retrieval_elapsed,
+        "original_query": question,
+        "rewritten_query": retrieval["rewritten_query"],
+        "query_rewrite_enabled": rewrite,
+        "top_k_before": top_k_before,
+        "top_k_after": top_k_after,
+        "similarity_threshold": threshold,
+        "candidate_count": len(retrieval["candidates_before_filter"]),
+        "passed_threshold_count": retrieval["passed_threshold_count"],
+        "dropped_by_threshold_count": retrieval["dropped_by_threshold_count"],
+        "chunks": [{
+            "source": chunk.get("source"),
+            "section": chunk.get("section"),
+            "chunk_id": chunk.get("chunk_id"),
+            "similarity": chunk.get("similarity"),
+            "text": chunk.get("text", ""),
+        } for chunk in chunks],
+        "evidence": format_rag_evidence(chunks) if chunks else "Подходящие фрагменты выше порога не найдены.",
+    }
+    expected = str(data.get("expected", ""))
+    if not chunks:
+        no_context = "Не знаю по найденным документам: релевантных фрагментов выше порога не найдено. Уточните вопрос или проверьте базу знаний."
+        return {
+            "question": question,
+            "expected": expected,
+            "expected_sources": expected_sources,
+            "retrieval": retrieval_info,
+            "baseline": {"ok": False, "answer": no_context, "error": "Модель не запускалась: нет контекста."},
+            "optimized": {"ok": False, "answer": no_context, "error": "Модель не запускалась: нет контекста."},
+            "model_status": _local_status(),
+            "index_info": _index_info(),
+        }
+
+    # Keep the model quantization and server context fixed across both runs, so
+    # the prompt and decoding changes can be compared on the same hardware run.
+    baseline_profile = {
+        "label": "До оптимизации",
+        "prompt": PROMPT_TEMPLATE,
+        "temperature": 0.2,
+        "max_tokens": 1000,
+    }
+    optimized_profile = {
+        "label": "После оптимизации · Сова-17",
+        "prompt": OPTIMIZED_PROMPT_TEMPLATE,
+        "temperature": 0.1,
+        "max_tokens": 500,
+    }
+    baseline = _measured_local_answer(question, context, baseline_profile, chunks, criteria, expected_sources)
+    optimized = _measured_local_answer(question, context, optimized_profile, chunks, criteria, expected_sources)
+    return {
+        "question": question,
+        "expected": expected,
+        "expected_sources": expected_sources,
+        "retrieval": retrieval_info,
+        "baseline": baseline,
+        "optimized": optimized,
+        "model_status": _local_status(),
+        "index_info": _index_info(),
+        "resource_note": "Память — RSS процесса llama-server, измеренная выборочно во время каждого ответа; общую память macOS это не показывает.",
+        "comparison_note": "В обоих запусках сохранены одна модель, её квантование, размер контекстного окна и одинаковые найденные фрагменты. Меняются системный промпт, temperature и max_tokens.",
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -351,7 +544,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"error": "Not found"}, 404)
 
     def do_POST(self) -> None:
-        if urlparse(self.path).path.rstrip("/") != "/api/day28/compare":
+        path = urlparse(self.path).path.rstrip("/")
+        if path not in ("/api/day28/compare", "/api/day29/optimize"):
             self._send_json({"error": "Not found"}, 404)
             return
         origin = self.headers.get("Origin")
@@ -365,7 +559,8 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict):
                 raise ValueError("Не удалось прочитать параметры запроса.")
-            self._send_json(run_comparison(data))
+            result = run_day29_optimization_demo(data) if path == "/api/day29/optimize" else run_comparison(data)
+            self._send_json(result)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self._send_json({"error": str(exc)}, 400)
         except Exception as exc:
@@ -376,11 +571,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    # Keep the established chat and sidebar as the primary app entry point.
-    # Day 28 local/cloud comparison is integrated in the existing comparison tab.
-    from day25 import main as run_main_chat
-
-    run_main_chat()
+    _load_dotenv()
+    index = DocumentIndexer()._load_chunks()
+    if not index:
+        raise SystemExit("document_index.json пуст или не найден. Приложение ожидает существующий индекс.")
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    print(f"Демонстрация RAG и оптимизации локальной LLM: http://127.0.0.1:{PORT}/day28")
+    print(f"Индекс document_index.json: {len(index)} чанков; retrieval выполняется локально.")
+    print(f"Локальная модель: {LOCAL_BASE_URL}; облачное сравнение: {'доступно' if os.environ.get('OPENROUTER_API_KEY') else 'нет OPENROUTER_API_KEY'}.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nВеб-сервер остановлен.")
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
