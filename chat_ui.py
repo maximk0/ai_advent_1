@@ -8,9 +8,18 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
 <head>
   <meta charset="utf-8">
   <title>{{TITLE}}</title>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>
+    // Keep the private local chat usable without loading scripts from a CDN.
+    const escapeMarkdownHtml = (value) => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    window.marked = { setOptions() {}, parse(value) {
+      let html = escapeMarkdownHtml(value);
+      html = html.replace(/```([\\s\\S]*?)```/g, '<pre><code>$1</code></pre>');
+      html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>').replace(/^## (.+)$/gm, '<h2>$1</h2>').replace(/^# (.+)$/gm, '<h1>$1</h1>');
+      html = html.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>');
+      return html.replace(/\\n/g, '<br>');
+    }};
+    window.hljs = { getLanguage() { return false; }, highlightAuto(value) { return { value: escapeMarkdownHtml(value) }; } };
+  </script>
   <style>
     :root {
       --bg-dark: #0d1117;

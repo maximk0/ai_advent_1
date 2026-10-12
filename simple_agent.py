@@ -482,6 +482,8 @@ class SimpleAgent:
         persist_state: bool = True,
         rag_source_prefix: str | None = None,
         rag_chunks: list | None = None,
+        context_char_limit: int | None = None,
+        max_tokens: int = 2000,
     ) -> dict:
         is_local_model = str(self.model).startswith("local/")
         api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -667,6 +669,18 @@ class SimpleAgent:
 
         # Short-Term Memory (STM)
         stm_history = conversation_history[:-1][-self.WINDOW_SIZE:]
+        if context_char_limit is not None:
+            # Keep the most recent dialogue turns that fit the app-level
+            # context budget. The current question is always sent separately.
+            bounded = []
+            used_chars = 0
+            for item in reversed(stm_history):
+                item_chars = len(str(item.get("content", "")))
+                if bounded and used_chars + item_chars > context_char_limit:
+                    break
+                bounded.append(item)
+                used_chars += item_chars
+            stm_history = list(reversed(bounded))
         messages += stm_history
         messages.append({"role": "user", "content": user_message})
 
@@ -699,7 +713,7 @@ class SimpleAgent:
         body = {
             "model": model_name,
             "messages": messages,
-            "max_tokens": 2000,
+            "max_tokens": max(1, min(int(max_tokens), 2000)),
         }
         if not is_local_model:
             body["plugins"] = [{"id": "context-compression", "enabled": self.context_compression}]
