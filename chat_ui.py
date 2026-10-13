@@ -167,18 +167,18 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
     .rag-evidence-card {
       margin-top: 10px;
       padding: 12px 15px;
-      border: 1px solid rgba(52, 211, 153, 0.35);
-      border-left: 3px solid #34d399;
+      border: 1px solid #3d536b;
+      border-left: 3px solid #75a9df;
       border-radius: 10px;
-      background: rgba(16, 185, 129, 0.07);
-      color: var(--text-dim);
+      background: #101923;
+      color: #d6e1ee;
       font-size: 0.84rem;
       line-height: 1.55;
       overflow-wrap: anywhere;
     }
     .rag-evidence-card summary {
       margin-bottom: 7px;
-      color: #6ee7b7;
+      color: #a9d0ff;
       font-size: 0.76rem;
       font-weight: 700;
       letter-spacing: .02em;
@@ -398,6 +398,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
 
     <div style="margin-top: auto;">
       <button onclick="clearChat()" style="width: 100%; padding: 10px; background: #ef4444; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 600;">🗑️ Очистить историю</button>
+      <button onclick="clearAllSettings()" style="width: 100%; padding: 9px; margin-top: 7px; background: transparent; border: 1px solid var(--border); color: var(--text-dim); border-radius: 8px; cursor: pointer;">Сбросить все настройки и память</button>
     </div>
   </aside>
 
@@ -517,6 +518,11 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
         if (meta.usage) {
             metaHtml += ` <span>🪙 ${meta.usage.total_tokens || 0} tokens</span>`;
         }
+        const completionTokens = Number(meta?.usage?.completion_tokens ?? meta?.usage?.output_tokens);
+        const elapsedSeconds = Number(meta?.time);
+        if (Number.isFinite(completionTokens) && completionTokens > 0 && Number.isFinite(elapsedSeconds) && elapsedSeconds > 0) {
+            metaHtml += ` <span>⚡ ≈${(completionTokens / elapsedSeconds).toFixed(1)} токенов/с</span>`;
+        }
         metaDiv.innerHTML = metaHtml;
         wrapper.appendChild(metaDiv);
       }
@@ -552,9 +558,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
         top_p: topPSlider.value,
         top_k: topKSlider.value
       };
-
-      if (document.getElementById('ragRewriteEnabled')) {
-        config.rag_query_rewrite_enabled = document.getElementById('ragRewriteEnabled').checked;
+      if (document.getElementById('ragTopKBefore')) {
         config.rag_top_k_before = document.getElementById('ragTopKBefore').value;
         config.rag_top_k_after = document.getElementById('ragTopKAfter').value;
         config.rag_similarity_threshold = document.getElementById('ragSimilarityThreshold').value;
@@ -587,6 +591,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
               rag_evidence: data.rag_evidence
           });
           if (typeof updateStats === 'function') updateStats(data.stats);
+          if (typeof refreshSidebarState === 'function') refreshSidebarState();
         }
       } catch (err) {
         if (loadingMsg.parentNode) chatLog.removeChild(loadingMsg);
@@ -609,9 +614,7 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
         top_p: topPSlider.value,
         top_k: topKSlider.value
       };
-
-      if (document.getElementById('ragRewriteEnabled')) {
-        config.rag_query_rewrite_enabled = document.getElementById('ragRewriteEnabled').checked;
+      if (document.getElementById('ragTopKBefore')) {
         config.rag_top_k_before = document.getElementById('ragTopKBefore').value;
         config.rag_top_k_after = document.getElementById('ragTopKAfter').value;
         config.rag_similarity_threshold = document.getElementById('ragSimilarityThreshold').value;
@@ -639,9 +642,25 @@ def get_chat_page(title="AI Agent", extra_sidebar_html="", extra_scripts="", ext
 
     async function clearChat() {
       if (!confirm('Очистить историю чата?')) return;
-      await fetch('/api/clear', { method: 'POST' });
+      if (window.day30ActiveView === 'help') {
+        const response = await fetch('/api/help/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        if (!response.ok) { alert('Не удалось очистить историю помощи по проекту.'); return; }
+        const helpLog = document.getElementById('d31HelpLog');
+        if (helpLog) helpLog.innerHTML = '<div class="d31-help-message assistant">История очищена. Задайте вопрос о проекте.</div>';
+        return;
+      }
+      const response = await fetch('/api/clear', { method: 'POST' });
+      if (!response.ok) { alert('Не удалось очистить историю чата.'); return; }
       chatLog.innerHTML = '<div class="msg-wrapper msg-bot"><div class="msg-bubble">История очищена. О чем поговорим?</div></div>';
       if (typeof updateStats === 'function') updateStats({total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, cost: 0});
+      if (typeof refreshSidebarState === 'function') refreshSidebarState();
+    }
+
+    async function clearAllSettings() {
+      if (!confirm('Сбросить историю, память и настройки чата к исходным значениям?')) return;
+      const response = await fetch('/api/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clear_all: true }) });
+      if (!response.ok) { alert('Не удалось сбросить настройки.'); return; }
+      location.reload();
     }
 
     async function initApp() {

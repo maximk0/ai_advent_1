@@ -804,8 +804,6 @@ class SimpleAgent:
 
                     if self.rag_mode_enabled and rag_evidence_chunks:
                         rag_evidence = format_rag_evidence(rag_evidence_chunks)
-                    elif not self.rag_mode_enabled:
-                        rag_evidence = "### Источники и цитаты\nПоиск по документам отключён для этого ответа; источники не запрашивались."
                     else:
                         rag_evidence = ""
 
