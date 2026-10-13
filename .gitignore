@@ -3,5 +3,12 @@
 __pycache__/
 *.pyc
 history.json
+history_day15.json
+history_project_help.json
+project_index.json
 .DS_Store
 .env
+.idea
+.artifacts
+/scheduler_db.json
+/report.md
