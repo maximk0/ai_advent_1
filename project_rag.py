@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import re
+from collections import Counter
 from pathlib import Path
 
 from document_indexer import DocumentIndexer
@@ -21,6 +23,7 @@ INCLUDED_FILES = (
     "chat_ui.py",
     "mcp_client.py",
     "mcp_server_git.py",
+    "project_rag.py",
     "code_review.py",
     ".github/workflows/ai-code-review.yml",
 )
@@ -84,6 +87,22 @@ class ProjectKnowledgeBase:
         self.root = root
         self.index_path = root / INDEX_PATH.name
         self.data = self.build()
+        self._tokenized_chunks = [
+            DocumentIndexer._tokens(chunk.get("text", "")) for chunk in self.data["chunks"]
+        ]
+        self._term_frequencies = [Counter(terms) for terms in self._tokenized_chunks]
+        self._document_frequency = Counter(
+            token for terms in self._tokenized_chunks for token in set(terms)
+        )
+        total_documents = max(1, len(self._tokenized_chunks))
+        self._document_norms = []
+        for frequencies in self._term_frequencies:
+            weights = [
+                (1 + math.log(count))
+                * math.log(1 + (total_documents + 1) / (self._document_frequency[term] + 1))
+                for term, count in frequencies.items()
+            ]
+            self._document_norms.append(math.sqrt(sum(value * value for value in weights)))
 
     def build(self) -> dict:
         chunks: list[dict] = []
@@ -132,18 +151,40 @@ class ProjectKnowledgeBase:
         denominator = len(original) + 0.35 * len(expanded)
         if not denominator:
             return []
+
+        chunks = self.data["chunks"]
+        total_documents = max(1, len(self._tokenized_chunks))
+
+        def weight(term: str, frequency: int) -> float:
+            inverse_document_frequency = math.log(
+                1 + (total_documents + 1) / (self._document_frequency[term] + 1)
+            )
+            return (1 + math.log(frequency)) * inverse_document_frequency
+
+        query_counts = Counter(rewritten)
+        query_vector = {term: weight(term, count) for term, count in query_counts.items()}
+        query_norm = math.sqrt(sum(value * value for value in query_vector.values()))
         ranked = []
-        for chunk in self.data["chunks"]:
-            terms = set(DocumentIndexer._tokens(chunk.get("text", "")))
+        for index, (chunk, chunk_tokens) in enumerate(zip(chunks, self._tokenized_chunks)):
+            terms = set(chunk_tokens)
             exact_hits = original & terms
             expanded_hits = expanded & terms
             score = (len(exact_hits) + 0.35 * len(expanded_hits)) / denominator
             if score < 0.06:
                 continue
+            chunk_counts = self._term_frequencies[index]
+            chunk_norm = self._document_norms[index]
+            dot_product = sum(
+                query_vector[term] * weight(term, chunk_counts[term])
+                for term in query_vector if term in chunk_counts
+            )
+            vector_similarity = dot_product / (query_norm * chunk_norm) if query_norm and chunk_norm else 0.0
             item = dict(chunk)
             item["similarity"] = round(score, 3)
+            item["vector_similarity"] = round(vector_similarity, 3)
+            item["retrieval_score"] = round(0.35 * score + 0.65 * vector_similarity, 3)
             item["search_score"] = len(exact_hits) + len(expanded_hits)
             item["matched_terms"] = sorted(exact_hits | expanded_hits)
             ranked.append(item)
-        ranked.sort(key=lambda item: (item["similarity"], item["search_score"]), reverse=True)
+        ranked.sort(key=lambda item: (item["retrieval_score"], item["similarity"], item["search_score"]), reverse=True)
         return ranked[:max(1, min(int(top_k), 10))]
