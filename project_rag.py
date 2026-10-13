@@ -21,6 +21,8 @@ INCLUDED_FILES = (
     "chat_ui.py",
     "mcp_client.py",
     "mcp_server_git.py",
+    "code_review.py",
+    ".github/workflows/ai-code-review.yml",
 )
 
 

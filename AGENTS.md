@@ -12,6 +12,7 @@ Main parts of the current application:
 - `project_rag.py` and the generated `project_index.json` provide search over this project's documentation and code.
 - `document_indexer.py`, `document_index.json`, and `docs/` are used for the educational RAG index and knowledge base.
 - `mcp_client.py` and `mcp_server_git.py` provide the current Git MCP integration.
+- `.github/workflows/ai-code-review.yml` and `code_review.py` review pull requests using OpenRouter and project RAG.
 - Older assignment results live in Git history; the working tree should contain the current app and only modules it uses.
 
 ## Preserve Existing Functionality
