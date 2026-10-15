@@ -15,12 +15,16 @@ MAX_CHUNK_CHARS = 1400
 INCLUDED_FILES = (
     "README.md",
     "docs/project_guide.md",
+    "docs/support/faq.md",
     "main.py",
     "simple_agent.py",
     "document_indexer.py",
     "chat_ui.py",
     "mcp_client.py",
     "mcp_server_git.py",
+    "mcp_server_support.py",
+    "project_rag.py",
+    "support_rag.py",
     "code_review.py",
     ".github/workflows/ai-code-review.yml",
 )

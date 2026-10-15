@@ -18,13 +18,14 @@ import urllib.request
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from chat_ui import get_chat_page
 from document_indexer import DocumentIndexer
 from mcp_client import MCPClient
 from project_rag import ProjectKnowledgeBase
 from simple_agent import SimpleAgent
+from support_rag import SupportKnowledgeBase
 
 ROOT = Path(__file__).resolve().parent
 HOST = os.getenv("DAY30_HOST", "127.0.0.1")
@@ -36,6 +37,7 @@ RATE_LIMIT_REQUESTS = 8
 RATE_LIMIT_WINDOW_SECONDS = 60
 MAX_STABILITY_TURNS = 5
 PROJECT_HELP_HISTORY_FILE = ROOT / "history_project_help.json"
+SUPPORT_HISTORY_FILE = ROOT / "history_support.json"
 LOCAL_MODEL = "local/qwen3-4b"
 LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
 PRIVATE_IPV4_NETWORKS = tuple(ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
@@ -50,6 +52,12 @@ _project_help_history_lock = threading.RLock()
 _project_knowledge: ProjectKnowledgeBase | None = None
 _git_mcp: MCPClient | None = None
 _mcp_init_lock = threading.Lock()
+_support_histories: dict[str, list[dict]] = {}
+_support_history_lock = threading.RLock()
+_support_mcp: MCPClient | None = None
+_support_mcp_lock = threading.Lock()
+_support_agent: SimpleAgent | None = None
+_support_knowledge = SupportKnowledgeBase()
 
 
 def _load_dotenv() -> None:
@@ -161,7 +169,37 @@ def _load_project_help_history() -> None:
         _save_project_help_history()
 
 
+def _load_support_histories() -> None:
+    global _support_histories
+    try:
+        stored = json.loads(SUPPORT_HISTORY_FILE.read_text(encoding="utf-8"))
+        if isinstance(stored, dict):
+            _support_histories = {
+                str(ticket_id): [
+                    item for item in items[-100:]
+                    if isinstance(item, dict) and item.get("role") in {"user", "assistant"}
+                    and isinstance(item.get("content"), str)
+                ]
+                for ticket_id, items in stored.items() if isinstance(items, list)
+            }
+    except FileNotFoundError:
+        pass
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Не удалось прочитать историю поддержки: {exc}")
+
+
+def _save_support_histories() -> None:
+    try:
+        SUPPORT_HISTORY_FILE.write_text(
+            json.dumps(_support_histories, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print(f"Не удалось сохранить историю поддержки: {exc}")
+
+
 _load_project_help_history()
+_load_support_histories()
 
 # When the app listens beyond loopback, require a per-run key. The page itself
 # is public on the LAN; all state and inference endpoints require the key.
@@ -339,6 +377,170 @@ def _project_help(message: str) -> dict:
         )
         _save_project_help_history()
         return answer
+
+
+def _support_mcp_call(tool_name: str, arguments: dict | None = None) -> dict | list:
+    global _support_mcp
+    with _support_mcp_lock:
+        if _support_mcp is None or not _support_mcp.is_connected:
+            _support_mcp = MCPClient(str(ROOT / "mcp_server_support.py"))
+        if not _support_mcp.is_connected:
+            raise ApiError(503, "MCP-сервер поддержки не подключился к JSON с тикетами.")
+        tool_names = {item.get("name") for item in _support_mcp.refresh_tools()}
+        if tool_name not in tool_names:
+            raise ApiError(503, f"MCP-сервер поддержки не предоставляет {tool_name}.")
+        raw = _support_mcp.call_tool(tool_name, arguments or {})
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ApiError(502, "MCP-сервер поддержки вернул некорректный JSON.") from exc
+    if isinstance(result, dict) and result.get("error"):
+        raise ApiError(404, str(result["error"]))
+    return result
+
+
+def _support_agent_instance() -> SimpleAgent:
+    global _support_agent
+    if _support_agent is None:
+        agent = SimpleAgent()
+        # This agent owns only support conversations; it never loads or writes the
+        # user's general chat, task memory, profiles, or invariants.
+        agent.history = []
+        agent.wm = {}
+        agent.ltm = {}
+        agent.task_state = {"goal": "", "clarifications": [], "constraints": [], "terms": {}}
+        agent.invariants = {}
+        agent.invariants_enabled = False
+        agent.planning_mode_enabled = False
+        agent.summary_context = ""
+        agent.saved_tokens = 0
+        agent.current_profile = "Поддержка продукта"
+        agent.profiles = {
+            agent.current_profile: {
+                "role": "Специалист поддержки B2B SaaS-платформы ПланФлоу",
+                "style": "Доброжелательный, краткий и практичный",
+                "format": "Пошаговые действия и понятные уточнения",
+                "constraints": "Опирайся на FAQ и тикет; не запрашивай секреты и не додумывай причины.",
+            }
+        }
+        agent.system_prompt = (
+            "Ты — ассистент поддержки вымышленной B2B SaaS-платформы ПланФлоу. Отвечай по-русски, спокойно и конкретно. "
+            "Используй только контекст выбранного тикета и переданные фрагменты FAQ. Различай подтверждённые факты "
+            "и предположения. Если данных недостаточно, задай уточняющий вопрос вместо выдуманного решения. "
+            "Никогда не проси пользователя присылать API-ключи, пароли или другие секреты. Для подтверждённых фактами "
+            "советов указывай chunk_id в квадратных скобках; источники и цитаты приложение покажет отдельно."
+        )
+        _support_agent = agent
+    return _support_agent
+
+
+def _support_ticket_list() -> list[dict]:
+    tickets = _support_mcp_call("list_support_tickets")
+    if not isinstance(tickets, list):
+        raise ApiError(502, "MCP-сервер поддержки вернул неожиданный список тикетов.")
+    return tickets
+
+
+def _support_answer(ticket_id: str, question: str | None = None) -> dict:
+    ticket_data = _support_mcp_call("get_support_ticket", {"ticket_id": ticket_id})
+    if not isinstance(ticket_data, dict) or not isinstance(ticket_data.get("ticket"), dict):
+        raise ApiError(502, "Не удалось получить выбранный тикет из MCP.")
+    ticket = ticket_data["ticket"]
+    user = ticket_data.get("user") if isinstance(ticket_data.get("user"), dict) else {}
+    company = ticket_data.get("company") if isinstance(ticket_data.get("company"), dict) else {}
+    product = ticket_data.get("product") if isinstance(ticket_data.get("product"), dict) else {}
+    question = str(question or ticket.get("question", "")).strip()
+    if not question:
+        raise ApiError(400, "В выбранном тикете нет исходного вопроса.")
+    environment = ticket.get("environment") if isinstance(ticket.get("environment"), dict) else {}
+    ticket_context = {
+        "product": product.get("name") or ticket.get("product"),
+        "ticket_id": ticket.get("ticket_id"),
+        "status": ticket.get("status"),
+        "subject": ticket.get("subject"),
+        "customer": {
+            "company": company.get("name"),
+            "plan": company.get("plan"),
+            "seats_used": company.get("seats_used"),
+            "seats_limit": company.get("seats_limit"),
+            "settings": company.get("settings", {}),
+        },
+        "user": {"display_name": user.get("display_name"), "role": user.get("role")},
+        "environment": environment,
+    }
+    retrieval_query = " ".join([
+        question,
+        str(ticket.get("subject", "")),
+        str(company.get("plan", "")),
+        str(company.get("name", "")),
+        json.dumps(environment, ensure_ascii=False),
+    ])
+    chunks = _support_knowledge.search(retrieval_query, top_k=4)
+    if not chunks:
+        answer = (
+            "В тикете есть сведения об обращении, но я не нашёл подтверждающую статью в FAQ. "
+            "Уточните, пожалуйста, текст ошибки и действия перед её появлением — без секретов и API-ключей."
+        )
+        evidence = "### Источники и цитаты\nДля вопроса не найден релевантный фрагмент в FAQ."
+        with _support_history_lock:
+            history = _support_histories.setdefault(ticket_id, [])
+            history.extend([
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": answer, "rag_evidence": evidence},
+            ])
+            _support_histories[ticket_id] = history[-100:]
+            _save_support_histories()
+        return {"content": answer, "rag_evidence": evidence, "ticket": ticket_context, "model": "FAQ fallback", "time": 0, "usage": {}}
+
+    prompt = (
+        "Контекст клиентского обращения, полученный через MCP из демонстрационной CRM ПланФлоу:\n"
+        f"{json.dumps(ticket_context, ensure_ascii=False, indent=2)}\n\n"
+        f"Вопрос пользователя поддержки: {question}"
+    )
+    support_agent = _support_agent_instance()
+    with _support_history_lock:
+        history = _support_histories.setdefault(ticket_id, [])
+        model_history = list(history)
+    with _lock:
+        current = _agent.get_state()["config"]
+        support_agent.model = current.get("model", SimpleAgent.MODEL_DEFAULT)
+        support_agent.model_supported_parameters = current.get("model_supported_parameters", [])
+        support_agent.temperature = float(current.get("temperature", 0.7))
+        support_agent.top_p = float(current.get("top_p", 1.0))
+        support_agent.top_k = int(current.get("top_k", 0))
+        support_agent.context_compression = bool(current.get("context_compression", True))
+        support_agent.rag_mode_enabled = True
+        support_agent.rag_top_k_before = max(1, len(chunks))
+        support_agent.rag_top_k_after = max(1, len(chunks))
+        started = time.monotonic()
+        result = support_agent.chat(
+            prompt,
+            history=model_history,
+            persist_state=False,
+            rag_source_prefix=None,
+            rag_chunks=chunks,
+            context_char_limit=MAX_DIALOGUE_CONTEXT_CHARS,
+            max_tokens=1000,
+        )
+    if result.get("error"):
+        raise ApiError(502, str(result["error"]))
+    answer = str(result.get("content", "Не удалось получить ответ."))
+    with _support_history_lock:
+        history = _support_histories.setdefault(ticket_id, [])
+        history.extend([
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": answer, "rag_evidence": result.get("rag_evidence", "")},
+        ])
+        _support_histories[ticket_id] = history[-100:]
+        _save_support_histories()
+    return {
+        "content": answer,
+        "rag_evidence": result.get("rag_evidence", ""),
+        "ticket": ticket_context,
+        "model": result.get("model", support_agent.model),
+        "time": round(time.monotonic() - started, 2),
+        "usage": result.get("usage", {}),
+    }
 
 
 def _prepare_local_chat(config: dict | None = None) -> None:
@@ -535,10 +737,29 @@ def _page() -> str:
       .d30-result{{padding:12px;margin:10px 0;border:1px solid var(--border);background:#101721;border-radius:9px;white-space:pre-wrap;overflow-wrap:anywhere}}
       .d30-result.ok{{border-color:#315b48}}.d30-result.fail{{border-color:#693c3c}}.d30-endpoint{{font:12px ui-monospace,monospace;overflow-wrap:anywhere}}
       @media(max-width:760px){{.d30-grid{{grid-template-columns:1fr}}}}
+      #day33SupportView{{display:flex;flex:1;min-height:0;overflow:hidden;padding:24px;background:radial-gradient(ellipse at top,#1a2a3c 0,#0d1117 55%)}}
+      .d33-support-shell{{width:100%;max-width:1000px;min-height:0;flex:1;margin:0 auto;display:flex;flex-direction:column;gap:12px}}
+      .d33-support-card{{padding:14px 16px;border:1px solid var(--border);border-radius:12px;background:linear-gradient(160deg,rgba(24,32,44,.98),rgba(17,23,32,.98))}}
+      .d33-support-card h2{{margin:0 0 6px;font-size:1.08rem}}.d33-support-card p{{margin:0;color:var(--text-dim);font-size:.82rem;line-height:1.45}}
+      .d33-support-controls{{display:flex;align-items:center;gap:10px;flex-wrap:wrap}}
+      .d33-support-controls label{{display:flex;align-items:center;gap:8px;color:var(--text-dim);font-size:.82rem}}
+      .d33-support-controls select,.d33-support-controls button{{background:var(--bg-dark);border:1px solid var(--border);color:var(--text-main);border-radius:7px;padding:8px;font:inherit}}
+      .d33-support-controls button{{cursor:pointer}}.d33-support-controls button:hover{{border-color:var(--primary)}}
+      #d33SupportTicketInfo{{color:var(--text-dim);font-size:.78rem;line-height:1.45;white-space:pre-wrap}}
+      #d33SupportLog{{display:flex;flex-direction:column;align-items:stretch;gap:12px;flex:1;min-height:0;overflow-y:auto;padding:2px 6px 12px;scrollbar-gutter:stable}}
+      .d33-support-message{{max-width:min(84%,800px);padding:13px 15px;border:1px solid var(--border);border-radius:12px;background:var(--bg-card);color:var(--text-main);overflow-wrap:anywhere;line-height:1.55}}
+      .d33-support-message.user{{align-self:flex-end;background:#18324a;border-color:#315b7c}}.d33-support-message.assistant{{align-self:flex-start}}
+      .d33-support-message details{{margin-top:10px;border-top:1px solid var(--border);padding-top:8px;color:var(--text-dim);font-size:.8rem}}
+      .d33-support-message details pre{{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}}
+      .d33-support-compose{{position:relative;z-index:2;flex:0 0 auto;display:flex;gap:9px;padding:10px;background:#0d1117;border:1px solid var(--border);border-radius:12px;box-shadow:0 -10px 24px rgba(0,0,0,.35)}}
+      #d33SupportQuestion{{flex:1;min-height:44px;max-height:150px;resize:vertical;background:var(--bg-dark);border:0;color:var(--text-main);font:inherit;outline:none}}
+      #d33SupportSend{{padding:9px 15px;border:0;border-radius:8px;background:var(--primary);color:#fff;font-weight:650;cursor:pointer}}#d33SupportSend:disabled{{opacity:.6;cursor:wait}}
+      @media(max-width:760px){{#day33SupportView{{padding:14px}}.d33-support-message{{max-width:94%}}}}
     </style>
     <div class="day30-tabs" role="tablist" aria-label="Разделы приложения">
       <button id="day30ChatTab" class="day30-tab active" role="tab" aria-selected="true">Чат</button>
       <button id="day31HelpTab" class="day30-tab" role="tab" aria-selected="false">Помощь по проекту</button>
+      <button id="day33SupportTab" class="day30-tab" role="tab" aria-selected="false">Поддержка</button>
       <button id="day30ServiceTab" class="day30-tab" role="tab" aria-selected="false">Сервис и API</button>
       <span id="day30TopStatus" class="control-help" style="margin-left:auto"></span>
     </div>
@@ -562,6 +783,15 @@ def _page() -> str:
         <form id="d31HelpForm" class="d31-help-compose"><textarea id="d31HelpQuestion" rows="1" placeholder="Спросите о структуре, запуске, API или Git…" required></textarea><button id="d31HelpSend" type="submit">Спросить</button></form>
       </div>
     </section>
+    <section id="day33SupportView" class="app-view" hidden>
+      <div class="d33-support-shell">
+        <article class="d33-support-card"><h2>Поддержка ПланФлоу</h2><p>Демонстрация поддержки вымышленной B2B SaaS-платформы: выберите обращение клиента, чтобы увидеть его исходный вопрос и контекст компании. Ответ строится по тикету и базе знаний; модель можно выбрать в сайдбаре.</p></article>
+        <div class="d33-support-card d33-support-controls"><label for="d33SupportTicket">Обращение клиента<select id="d33SupportTicket"><option value="">Загружаю обращения…</option></select></label><button type="button" id="d33SupportClear">Очистить историю тикета</button><span id="d33SupportMcpStatus" style="color:var(--text-dim);font-size:.75rem"></span><div id="d33SupportTicketInfo"></div></div>
+        <div id="d33SupportLog" aria-live="polite"><div class="d33-support-message assistant">Выберите обращение клиента. Исходный вопрос уже будет в чате — вводить его отдельно не нужно.</div></div>
+        <div class="d33-support-controls"><button type="button" id="d33SupportReply" hidden>Ответить на обращение</button></div>
+        <form id="d33SupportForm" class="d33-support-compose"><textarea id="d33SupportQuestion" rows="1" placeholder="Уточнение по обращению клиента…"></textarea><button id="d33SupportSend" type="submit">Отправить</button></form>
+      </div>
+    </section>
     """
     script = f"""
     const DAY30_KEY_REQUIRED = {str(bool(_api_key)).lower()};
@@ -581,11 +811,11 @@ def _page() -> str:
     document.getElementById('day30Connect').addEventListener('click',async()=>{{
       sessionStorage.setItem('day30-api-key',document.getElementById('day30ApiKey').value.trim());
       const response=await originalFetch('/api/day30/status',{{headers:{{'Authorization':`Bearer ${{sessionStorage.getItem('day30-api-key')}}`}}}});
-      if(response.ok){{day30KeyBox.hidden=true;await loadDay30Status();await initApp();await loadProjectHelpHistory();}}else{{alert('Ключ доступа не подошёл. Скопируйте ключ из окна запуска сервера.');sessionStorage.removeItem('day30-api-key');}}
+      if(response.ok){{day30KeyBox.hidden=true;await loadDay30Status();await initApp();await loadProjectHelpHistory();await loadSupportTickets();}}else{{alert('Ключ доступа не подошёл. Скопируйте ключ из окна запуска сервера.');sessionStorage.removeItem('day30-api-key');}}
     }});
-    const day30ChatTab=document.getElementById('day30ChatTab'), day30ServiceTab=document.getElementById('day30ServiceTab'), day31HelpTab=document.getElementById('day31HelpTab');
-    function day30Show(view){{window.day30ActiveView=view;const tabs=[['chat',day30ChatTab,document.getElementById('chatView')],['help',day31HelpTab,document.getElementById('day31HelpView')],['service',day30ServiceTab,document.getElementById('day30View')]];for(const [name,tab,section] of tabs){{const active=view===name;section.hidden=!active;tab.classList.toggle('active',active);tab.setAttribute('aria-selected',String(active));}}}}
-    day30ChatTab.addEventListener('click',()=>day30Show('chat'));day30ServiceTab.addEventListener('click',()=>day30Show('service'));day31HelpTab.addEventListener('click',()=>day30Show('help'));
+    const day30ChatTab=document.getElementById('day30ChatTab'), day30ServiceTab=document.getElementById('day30ServiceTab'), day31HelpTab=document.getElementById('day31HelpTab'), day33SupportTab=document.getElementById('day33SupportTab');
+    function day30Show(view){{window.day30ActiveView=view;const tabs=[['chat',day30ChatTab,document.getElementById('chatView')],['help',day31HelpTab,document.getElementById('day31HelpView')],['support',day33SupportTab,document.getElementById('day33SupportView')],['service',day30ServiceTab,document.getElementById('day30View')]];for(const [name,tab,section] of tabs){{const active=view===name;section.hidden=!active;tab.classList.toggle('active',active);tab.setAttribute('aria-selected',String(active));}}}}
+    day30ChatTab.addEventListener('click',()=>day30Show('chat'));day30ServiceTab.addEventListener('click',()=>day30Show('service'));day31HelpTab.addEventListener('click',()=>day30Show('help'));day33SupportTab.addEventListener('click',()=>{{day30Show('support');loadSupportTickets();}});
     function day30Escape(value){{return String(value??'').replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));}}
     const d31HelpView=document.getElementById('day31HelpView'),d31HelpForm=document.getElementById('d31HelpForm'),d31HelpQuestion=document.getElementById('d31HelpQuestion'),d31HelpLog=document.getElementById('d31HelpLog'),d31HelpSend=document.getElementById('d31HelpSend');
     function d31HelpScrollToLatest(){{d31HelpLog.scrollTo({{top:d31HelpLog.scrollHeight,behavior:'smooth'}});}}
@@ -596,6 +826,19 @@ def _page() -> str:
     d31HelpForm.addEventListener('submit',event=>{{event.preventDefault();d31AskHelp(d31HelpQuestion.value);}});
     document.querySelectorAll('.d31-help-topic').forEach(button=>button.addEventListener('click',()=>d31AskHelp(button.dataset.question||'')));
     document.addEventListener('DOMContentLoaded',loadProjectHelpHistory);
+    const d33SupportTicket=document.getElementById('d33SupportTicket'),d33SupportLog=document.getElementById('d33SupportLog'),d33SupportForm=document.getElementById('d33SupportForm'),d33SupportQuestion=document.getElementById('d33SupportQuestion'),d33SupportSend=document.getElementById('d33SupportSend'),d33SupportReply=document.getElementById('d33SupportReply');
+    function d33SupportScroll(){{d33SupportLog.scrollTo({{top:d33SupportLog.scrollHeight,behavior:'smooth'}});}}
+    function d33SupportAddMessage(role,text,evidence=''){{const node=document.createElement('div');node.className=`d33-support-message ${{role}}`;if(role==='assistant')node.innerHTML=marked.parse(String(text));else node.textContent=text;if(evidence){{const details=document.createElement('details'),summary=document.createElement('summary'),pre=document.createElement('pre');summary.textContent='Источники и цитаты';pre.textContent=evidence;details.append(summary,pre);node.append(details);}}d33SupportLog.append(node);d33SupportScroll();return node;}}
+    function d33SupportLoader(){{const node=document.createElement('div');node.className='d33-support-message assistant loading';node.setAttribute('role','status');node.setAttribute('aria-live','polite');node.innerHTML='<span class="d31-help-spinner" aria-hidden="true"></span><span>Сверяю данные тикета с FAQ и готовлю ответ…</span>';d33SupportLog.append(node);d33SupportScroll();return node;}}
+    function d33SupportOptionTicket(option){{return option?{{ticket_id:option.value,status:option.dataset.status,subject:option.dataset.subject,question:option.dataset.question,user_name:option.dataset.user,user_role:option.dataset.role,company_name:option.dataset.company,plan:option.dataset.plan,seats:option.dataset.seats}}:null;}}
+    function d33SupportShowTicket(ticket){{const info=document.getElementById('d33SupportTicketInfo');if(!ticket){{info.textContent='';return;}}info.textContent=`${{ticket.company_name||'Компания'}} · тариф ${{ticket.plan||'—'}} · ${{ticket.user_name||'Пользователь'}} (${{ticket.user_role||'—'}}) · ${{ticket.seats||'—'}} мест · ${{ticket.ticket_id}} · ${{ticket.status}}`;}}
+    async function loadSupportHistory(){{const id=d33SupportTicket.value;if(!id)return;try{{const response=await fetch(`/api/support/history?ticket_id=${{encodeURIComponent(id)}}`);const data=await response.json();d33SupportLog.replaceChildren();if(Array.isArray(data.history)&&data.history.length){{data.history.forEach(item=>d33SupportAddMessage(item.role,item.content,item.role==='assistant'?item.rag_evidence||'':''));d33SupportReply.hidden=true;}}else{{const ticket=d33SupportOptionTicket(d33SupportTicket.selectedOptions[0]);if(ticket?.question)d33SupportAddMessage('user',ticket.question);d33SupportAddMessage('assistant','Исходное обращение клиента загружено. Нажмите «Ответить на обращение», чтобы подготовить ответ с учётом компании и тарифа.');d33SupportReply.hidden=false;}}d33SupportLog.scrollTop=d33SupportLog.scrollHeight;}}catch(error){{console.warn('Не удалось загрузить историю поддержки:',error);}}}}
+    async function loadSupportTickets(){{if(d33SupportTicket.dataset.loaded==='true')return;try{{const response=await fetch('/api/support/tickets');const data=await response.json();if(!response.ok)throw new Error(data.error||'Не удалось получить обращения из MCP');d33SupportTicket.replaceChildren();(data.tickets||[]).forEach(ticket=>{{const option=document.createElement('option');option.value=ticket.ticket_id;option.textContent=`${{ticket.ticket_id}} · ${{ticket.company_name}} · ${{ticket.subject}}`;for(const [key,value] of Object.entries({{subject:ticket.subject,question:ticket.question,status:ticket.status,user:ticket.user_name,role:ticket.user_role,company:ticket.company_name,plan:ticket.plan,seats:`${{ticket.seats_used}}/${{ticket.seats_limit}}`}}))option.dataset[key]=value||'';d33SupportTicket.append(option);}});if(!d33SupportTicket.options.length)throw new Error('В JSON-CRM нет обращений');d33SupportTicket.dataset.loaded='true';document.getElementById('d33SupportMcpStatus').textContent='MCP подключён · CRM ПланФлоу';d33SupportShowTicket(d33SupportOptionTicket(d33SupportTicket.selectedOptions[0]));await loadSupportHistory();}}catch(error){{document.getElementById('d33SupportMcpStatus').textContent=`MCP недоступен: ${{error.message}}`;d33SupportTicket.replaceChildren(new Option('Не удалось загрузить обращения',''));}}}}
+    d33SupportTicket.addEventListener('change',()=>{{d33SupportShowTicket(d33SupportOptionTicket(d33SupportTicket.selectedOptions[0]));loadSupportHistory();}});
+    async function d33SupportAsk(question,initial=false){{const text=(question||'').trim(),ticketId=d33SupportTicket.value;if((!initial&&!text)||!ticketId||d33SupportSend.disabled)return;if(initial){{const ticket=d33SupportOptionTicket(d33SupportTicket.selectedOptions[0]);d33SupportLog.replaceChildren();d33SupportAddMessage('user',ticket.question||'');d33SupportReply.hidden=true;}}else d33SupportAddMessage('user',text);const loader=d33SupportLoader();d33SupportSend.disabled=true;d33SupportReply.disabled=true;d33SupportTicket.disabled=true;document.getElementById('d33SupportClear').disabled=true;d33SupportQuestion.value='';try{{const payload=initial?{{ticket_id:ticketId,initial:true}}:{{ticket_id:ticketId,message:text}};const response=await fetch('/api/support/chat',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload)}});const data=await response.json();if(!response.ok||data.error)throw new Error(data.error||'Не удалось получить ответ');loader.remove();d33SupportAddMessage('assistant',data.content||'Ответ не получен.',data.rag_evidence||'');d33SupportReply.hidden=true;}}catch(error){{loader.classList.remove('loading');loader.replaceChildren();loader.textContent=`Не удалось получить ответ: ${{error.message}}`;}}finally{{d33SupportSend.disabled=false;d33SupportReply.disabled=false;d33SupportTicket.disabled=false;document.getElementById('d33SupportClear').disabled=false;d33SupportQuestion.focus();}}}}
+    d33SupportReply.addEventListener('click',()=>d33SupportAsk('',true));d33SupportForm.addEventListener('submit',event=>{{event.preventDefault();d33SupportAsk(d33SupportQuestion.value);}});
+    document.getElementById('d33SupportClear').addEventListener('click',async()=>{{const ticketId=d33SupportTicket.value;if(!ticketId)return;const response=await fetch('/api/support/clear',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ticket_id:ticketId}})}});if(response.ok)loadSupportHistory();}});
+    document.addEventListener('DOMContentLoaded',loadSupportTickets);
     const SIDEBAR_INVARIANT_PRESETS={{
       'Архитектура':'Для Android-функций придерживаться Strict MVI и однонаправленного потока данных (UDF); сайд-эффекты отделять от состояния экрана.',
       'Стек проекта':'Для Android-кода использовать Kotlin, Jetpack Compose и Koin; не добавлять Java и устаревшие XML-разметки.',
@@ -753,6 +996,20 @@ class Handler(BaseHTTPRequestHandler):
                 with _project_help_history_lock:
                     self._send_json({"history": _project_help_history})
                 return
+            if path == "/api/support/tickets":
+                try:
+                    self._send_json({
+                        "tickets": _support_ticket_list(),
+                        "mcp": {"connected": True, "server": "JSON CRM", "tools": ["list_support_tickets", "get_support_ticket"]},
+                    })
+                except ApiError as exc:
+                    self._send_json({"error": str(exc)}, exc.status)
+                return
+            if path == "/api/support/history":
+                ticket_id = parse_qs(urlparse(self.path).query).get("ticket_id", [""])[0]
+                with _support_history_lock:
+                    self._send_json({"history": _support_histories.get(ticket_id, [])})
+                return
             if path == "/api/state":
                 with _lock:
                     self._send_json(_agent.get_state())
@@ -778,10 +1035,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._send_json({"error": "Требуется ключ доступа сервера."}, 401)
             return
-        if path not in {"/api/chat", "/api/config", "/api/clear", "/api/help/clear", "/api/day30/stability", "/v1/chat/completions", "/api/invariants/add", "/api/invariants/delete", "/api/invariants/reset", "/api/profile/switch", "/api/profile/save", "/api/memory/pin_ltm", "/api/tsm/update"}:
+        if path not in {"/api/chat", "/api/config", "/api/clear", "/api/help/clear", "/api/support/chat", "/api/support/clear", "/api/day30/stability", "/v1/chat/completions", "/api/invariants/add", "/api/invariants/delete", "/api/invariants/reset", "/api/profile/switch", "/api/profile/save", "/api/memory/pin_ltm", "/api/tsm/update"}:
             self._send_json({"error": "Not found"}, 404)
             return
-        if path in {"/api/chat", "/api/day30/stability", "/v1/chat/completions"} and self._limited():
+        if path in {"/api/chat", "/api/support/chat", "/api/day30/stability", "/v1/chat/completions"} and self._limited():
             return
         try:
             body_length = self.headers.get("Content-Length", "0")
@@ -843,6 +1100,26 @@ class Handler(BaseHTTPRequestHandler):
                 with _project_help_history_lock:
                     _project_help_history.clear()
                     _save_project_help_history()
+                self._send_json({"ok": True})
+                return
+            if path == "/api/support/chat":
+                ticket_id = str(data.get("ticket_id", "")).strip()
+                initial = bool(data.get("initial"))
+                question = None if initial else data.get("message")
+                if not ticket_id:
+                    raise ApiError(400, "Выберите тикет поддержки.")
+                if not initial and (not isinstance(question, str) or not question.strip()):
+                    raise ApiError(400, "Введите уточнение по выбранному обращению.")
+                result = _support_answer(ticket_id, question.strip() if isinstance(question, str) else None)
+                self._send_json(result)
+                return
+            if path == "/api/support/clear":
+                ticket_id = str(data.get("ticket_id", "")).strip()
+                if not ticket_id:
+                    raise ApiError(400, "Выберите тикет для очистки истории.")
+                with _support_history_lock:
+                    _support_histories.pop(ticket_id, None)
+                    _save_support_histories()
                 self._send_json({"ok": True})
                 return
             if path == "/api/invariants/add":
@@ -961,6 +1238,8 @@ def main() -> None:
         server.server_close()
         if _git_mcp is not None:
             _git_mcp.close()
+        if _support_mcp is not None:
+            _support_mcp.close()
 
 
 if __name__ == "__main__":
