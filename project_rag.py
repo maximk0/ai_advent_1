@@ -24,6 +24,7 @@ INCLUDED_FILES = (
     "mcp_server_git.py",
     "mcp_server_support.py",
     "project_rag.py",
+    "project_file_tools.py",
     "support_rag.py",
     "code_review.py",
     ".github/workflows/ai-code-review.yml",

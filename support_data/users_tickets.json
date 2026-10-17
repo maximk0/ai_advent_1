@@ -1,0 +1,67 @@
+{
+  "product": {
+    "name": "ПланФлоу",
+    "description": "Вымышленная B2B SaaS-платформа для управления проектами, задачами и командной работой."
+  },
+  "companies": [
+    {
+      "company_id": "ORG-204",
+      "name": "ООО «Вектор Логистик»",
+      "plan": "Business",
+      "seats_used": 42,
+      "seats_limit": 50,
+      "settings": {"custom_roles": true, "sso": false}
+    },
+    {
+      "company_id": "ORG-318",
+      "name": "ООО «Маяк Консалтинг»",
+      "plan": "Team",
+      "seats_used": 20,
+      "seats_limit": 20,
+      "settings": {"custom_roles": false, "sso": false}
+    },
+    {
+      "company_id": "ORG-451",
+      "name": "АО «Северный мост»",
+      "plan": "Enterprise",
+      "seats_used": 116,
+      "seats_limit": 200,
+      "settings": {"custom_roles": true, "sso": true, "sso_protocol": "SAML", "ip_allowlist": "203.0.113.0/24"}
+    }
+  ],
+  "users": [
+    {"user_id": "USR-204", "display_name": "Марина Волкова", "role": "Администратор пространства", "company_id": "ORG-204"},
+    {"user_id": "USR-318", "display_name": "Илья Громов", "role": "Администратор пространства", "company_id": "ORG-318"},
+    {"user_id": "USR-451", "display_name": "Анна Белова", "role": "ИТ-администратор", "company_id": "ORG-451"}
+  ],
+  "tickets": [
+    {
+      "ticket_id": "SUP-2041",
+      "status": "Открыт",
+      "subject": "Доступ внешнего аудитора к отчётам",
+      "question": "Можно ли дать внешнему аудитору доступ только к отчётам, не показывая задачи команды?",
+      "user_id": "USR-204",
+      "company_id": "ORG-204",
+      "product": "ПланФлоу"
+    },
+    {
+      "ticket_id": "SUP-3187",
+      "status": "Открыт",
+      "subject": "Не удаётся пригласить сотрудника",
+      "question": "Не получается пригласить 21-го сотрудника. Что делать?",
+      "user_id": "USR-318",
+      "company_id": "ORG-318",
+      "product": "ПланФлоу"
+    },
+    {
+      "ticket_id": "SUP-4512",
+      "status": "Открыт",
+      "subject": "Вход из нового офиса не работает",
+      "question": "Почему команда не может войти в ПланФлоу из нового офиса?",
+      "user_id": "USR-451",
+      "company_id": "ORG-451",
+      "product": "ПланФлоу",
+      "environment": {"reported_ip": "198.51.100.28", "sso_protocol": "SAML"}
+    }
+  ]
+}
